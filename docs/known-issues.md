@@ -5,6 +5,9 @@ with each release. Nothing here has been measured on more than one device, an AY
 
 ## Not tested
 
+- **The software keyboard dialog** (0.5.0). Ocarina of Time 3D's file name screen uses the game's
+  own keyboard, so the dialog was not seen on a device.
+- **Mod stacking and Remove mods** (0.5.0) on a device.
 - **Storage screen:** the "A game is open" refusal and actually deleting an item. Only the
   listing and a cancelled confirm were seen.
 - **Save editor backups** (`user.backup-<ms>`, `:backups` in the picker) in a real editor.
@@ -22,6 +25,8 @@ with each release. Nothing here has been measured on more than one device, an AY
 
 ## Known problems
 
+- **Save slot list in 0.5.0:** press the D-pad once before A; no row is selected when the list
+  opens. Fixed for the next release.
 - **Town Map lines** show on the Town Map in Ultra Moon, with the second-display sharing
   switch on or off. That switch was dropped (see the testing record) and the lines remain.
 - **Second display:** the bottom screen shows the game's native 320x240 picture, upscaled,

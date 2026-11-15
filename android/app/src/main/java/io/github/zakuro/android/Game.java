@@ -355,7 +355,7 @@ public final class Game extends NativeActivity {
             return true;
         });
         d.show(); palette.dialog(d,false);
-        android.widget.ListView list=d.getListView(); list.setItemsCanFocus(false); list.setFocusableInTouchMode(true); list.post(() -> { list.requestFocus(); list.setSelection(0); });
+        android.widget.ListView list=d.getListView(); list.setItemsCanFocus(false); list.setFocusableInTouchMode(true); list.post(() -> { list.requestFocusFromTouch(); list.setSelection(0); }); // FromTouch: in touch mode a plain requestFocus leaves no row selected, so A did nothing until the D-pad moved
     }
     private void confirmExit() {
         menuOpen=false;

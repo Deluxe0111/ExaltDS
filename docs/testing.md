@@ -4,6 +4,31 @@ Paths starting with `build/` below are on the maintainer's machine and are not i
 repository. Only [`docs/evidence/`](evidence/) holds files you can read. Counts and results
 belong to the release or build they were taken on; the newest section is first.
 
+## 0.5.0 check on the Thor (2026-11-15)
+
+AYN Thor, Turnip (Balemuni), Ultra Moon 3x + HD, `frame_generation` x4, second display on. The
+published `Zakuroishi-0.5.0.apk` (SHA-256 `2c05ea18...a6e0`, version code 15) installed over 0.4.0
+with `adb install -r`; games, settings and saves were kept.
+
+| Check | Result |
+| --- | --- |
+| Ultra Moon, launch into a wild battle (`device-test.sh fight`) | Passed. 100.3-100.4% speed, worst battle frame 40.5 ms core, field entry 27.0 ms |
+| Save to slot, Pokémon X | Passed: "Saved slot 1", the list then shows the slot's time |
+| Load from slot, Pokémon X | Passed: confirm dialog, "Loaded slot 1", the earlier screen came back |
+| Slot list with a controller | **Bug:** no row selected when the list opens, A did nothing until the D-pad moved. Fixed after 0.5.0 (`requestFocusFromTouch`), rechecked on the Thor with a build of this branch |
+| Software keyboard dialog | **Not reached.** Ocarina of Time 3D's file name screen draws the game's own keyboard, which works; the Android dialog never opened. No installed game was found that asks for it |
+| Mod stacking and Remove mods | Not run: they need the system file picker |
+
+`request_wait_idle`, 3 runs each, alternating, same save and scene (wild battle in tall grass):
+
+| `request_wait_idle` | Battle mean core ms (runs) | Mean | Worst battle frame, median |
+| --- | --- | --- | --- |
+| off (0.5.0 default) | 4.76, 4.80, 4.78 | 4.78 | 34.0 ms |
+| on (the wait 0.4.0 had) | 4.84, 4.94, 5.45 | 5.08 | 34.1 ms |
+
+The default is about 6% cheaper per frame in battle and the runs don't overlap, but it is three
+runs on one device. Speed and the worst frame did not change. The default stays off.
+
 ## 0.4.0 release check (2026-11-07, build `6c3b621`)
 
 AYN Thor, Turnip (Balemuni), panel 60 Hz, Ultra Moon 3x + HD, `frame_generation` x4 (falls back to

@@ -1,5 +1,13 @@
 # Changelog
 
+## Unreleased
+
+- **Save slots:** the slot list now opens with its first row selected. In 0.5.0 nothing was
+  selected until the D-pad moved, so A did nothing at first. Checked on the Thor, see
+  [testing](testing.md#050-check-on-the-thor-2026-11-15).
+- 0.5.0 was checked on the Thor on 2026-11-15: launch, play, save slots and the
+  `request_wait_idle` switch. The software keyboard dialog and mod stacking were not reached.
+
 ## 0.5.0 — Save slots, stacking mods, the software keyboard, Pocket Native core fixes (2026-11-09)
 
 Released without a device test: host checks and CI only, see the [release notes](releases/android-0.5.0.md).
