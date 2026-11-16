@@ -1048,7 +1048,7 @@ pub fn run(app: &AndroidApp) -> Result<(), String> {
         // Recall Fate asked for from the game's own map menu
         if let Some(outcome) = recall.after_frame(system) {
             match outcome {
-                Ok(turn) => platform::message(app, &format!("Back to turn {turn}")),
+                Ok(text) => platform::message(app, &text),
                 Err(error) => platform::message(app, &error),
             }
             audio = None;
