@@ -17,7 +17,9 @@ import java.util.*;
  *
  * Mods are kept as separate layers in files/exalt/mods/<title>/<name>/romfs, each switched on or off; applying them
  * hard-links the switched-on layers into the game's data/mods/<title>/romfs (the folder the runtime reads), so a toggle
- * costs no copying. A texture pack goes where Zakuroishi puts one (GameImport.replaceTextures).
+ * costs no copying. A texture pack goes where Zakuroishi puts one (GameImport.replaceTextures). A layer may also hold a
+ * textures folder (pictures for textures its romfs changes, e.g. Naga's Tear's icon sheet); applying links those into
+ * the texture pack's folder under .exalt-layers/<layer>, which the pack reads with the rest.
  */
 final class Exalt {
     static final String PACKAGE = "io.github.exaltds";
@@ -115,8 +117,18 @@ final class Exalt {
             if (romfs.exists()) Files.move(romfs.toPath(), old.toPath());
             if (any) Files.move(stage.toPath(), romfs.toPath());
             GameImport.remove(old);
+            // the layers' pictures, beside the texture pack's own
+            File pictures = new File(new File(parent, "textures"), LAYER_TEXTURES);
+            GameImport.remove(pictures);
+            for (Layer l : list(c, id)) {
+                if (!l.on) continue;
+                File from = new File(new File(layers(c, id), l.name), "textures");
+                if (from.isDirectory()) link(from, new File(pictures, l.name));
+            }
         }
     }
+    /** The folder, inside the texture pack's, that holds the switched-on layers' pictures. */
+    static final String LAYER_TEXTURES = ".exalt-layers";
 
     private static void link(File from, File to) throws IOException {
         GameImport.mkdir(to);
@@ -155,11 +167,11 @@ final class Exalt {
         return out;
     }
 
-    /** Where the mod's romfs is: the chosen folder itself when it is named romfs, else a romfs folder at most two levels in. */
-    private static Doc findRomfs(ContentResolver r, Uri tree, Doc at, int depth) throws IOException {
-        for (Doc d : children(r, tree, at.id)) if (d.dir && d.name.equalsIgnoreCase("romfs")) return d;
+    /** A folder named name (romfs: the mod's files; textures: its pictures) at most depth levels in. */
+    private static Doc findNamed(ContentResolver r, Uri tree, Doc at, int depth, String name) throws IOException {
+        for (Doc d : children(r, tree, at.id)) if (d.dir && d.name.equalsIgnoreCase(name)) return d;
         if (depth == 0) return null;
-        for (Doc d : children(r, tree, at.id)) if (d.dir) { Doc found = findRomfs(r, tree, d, depth - 1); if (found != null) return found; }
+        for (Doc d : children(r, tree, at.id)) if (d.dir) { Doc found = findNamed(r, tree, d, depth - 1, name); if (found != null) return found; }
         return null;
     }
 
@@ -186,7 +198,8 @@ final class Exalt {
             if (cur != null && cur.moveToFirst()) rootName = cur.getString(0);
         }
         Doc root = new Doc(rootId, rootName, true, -1);
-        Doc romfs = rootName.equalsIgnoreCase("romfs") ? root : findRomfs(r, tree, root, 2);
+        Doc romfs = rootName.equalsIgnoreCase("romfs") ? root : findNamed(r, tree, root, 2, "romfs");
+        Doc textures = romfs == root ? null : findNamed(r, tree, root, 2, "textures");
         if (romfs == null) {
             if (!hasPng(r, tree, root, 6)) throw new IOException("This folder holds neither a romfs folder (a mod) nor PNG pictures (a texture pack).");
             GameImport.replaceTextures(c, id, tree, progress);
@@ -200,6 +213,7 @@ final class Exalt {
         try {
             copy(r, tree, romfs, new File(stage, "romfs"), done, progress, 0);
             if (done[1] == 0) throw new IOException("The romfs folder is empty.");
+            if (textures != null) copy(r, tree, textures, new File(stage, "textures"), done, progress, 0);
             GameImport.remove(target);
             Files.move(stage.toPath(), target.toPath());
         } finally { GameImport.remove(stage); }
