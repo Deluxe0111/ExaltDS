@@ -509,6 +509,7 @@ pub fn run(app: &AndroidApp) -> Result<(), String> {
     let mut second_join_tried = false;
     // development A/B switch: adb shell setprop debug.zakuro.second_readback 1
     let force_second_readback = platform::system_property(c"debug.zakuro.second_readback").as_deref() == Some("1");
+    let mut recall = crate::recall::Recall::new();
     // The main presenter while Android has taken its window away (app switch).
     let mut parked: Option<Surface> = None;
     let mut system: Option<System> = None;
@@ -733,7 +734,22 @@ pub fn run(app: &AndroidApp) -> Result<(), String> {
                     input.finger = None;
                     bridge::clear_input();
                 }
+                Command::Recall(turn) => {
+                    if let Some(system) = &mut system {
+                        match recall.recall(system, turn) {
+                            Ok(()) => platform::message(app, &format!("Back to turn {turn}")),
+                            Err(error) => platform::message(app, &error),
+                        }
+                        audio = None;
+                        input = Input::default();
+                        bridge::clear_input();
+                        next_frame = Instant::now();
+                    }
+                }
                 Command::Save(slot) | Command::Load(slot) => {
+                    if matches!(command, Command::Load(_)) {
+                        recall.reset();
+                    }
                     if let Some(system) = &mut system {
                         let id = system
                             .title
@@ -1029,6 +1045,7 @@ pub fn run(app: &AndroidApp) -> Result<(), String> {
         }
         let cycles_before = system.cpu.cycles;
         let outcome = system.run_frame();
+        recall.after_frame(system);
         let cycles = system.cpu.cycles.saturating_sub(cycles_before);
         stats_cycles += cycles;
         benchmark_cycles += cycles;

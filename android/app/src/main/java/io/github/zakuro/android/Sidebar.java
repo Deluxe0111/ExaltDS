@@ -247,6 +247,9 @@ final class Sidebar {
         main.addView(hd);
         main.addView(divider());
 
+        // Recall Fate, turn-level proof of concept (NAGA_TEAR_PLAN.md NT-04): back to the start of an
+        // earlier player phase of this battle. The battle menu command comes later (NT-06).
+        if (naga != null && naga.on) main.addView(row("Recall Fate (test)…", v -> recallFate()));
         main.addView(row("Mods / textures…", v -> show(mods)));
         main.addView(row("GPU driver…", v -> show(drivers)));
         // a rebuilt title.so in place: keeps the ROM, textures, mods, saves and save states (Replace game files drops the states)
@@ -316,6 +319,18 @@ final class Sidebar {
             modsList.addView(check(l.name, l.on, on -> { Exalt.setOn(game, id, l.name, on); modsChanged = true; refreshApply(); }));
         modsStatus.setText((layers.isEmpty() ? "No mods imported." : layers.size() + (layers.size() == 1 ? " mod." : " mods."))
                 + "\nHD texture pack: " + (hasPack() ? (s.textures ? "installed, on" : "installed, off") : "none"));
+    }
+
+    private void recallFate() {
+        int[] turns = game.recallTurns();
+        if (turns.length == 0) { toast("Nothing to recall yet: the start of each player phase of this battle is kept from the next one on."); return; }
+        String[] names = new String[turns.length];
+        for (int i = 0; i < names.length; i++) names[i] = "Turn " + turns[i] + " · Player Phase";
+        AlertDialog d = new AlertDialog.Builder(game, game.palette().dialogTheme()).setTitle("Recall Fate")
+                // the recall first, then a plain close, which resumes the game (a hand-off would leave it paused)
+                .setItems(names, (x, i) -> { game.command(Game.RECALL | turns[i] << 4); close(); })
+                .setNegativeButton("Cancel", null).create();
+        d.show(); game.palette().dialog(d, false);
     }
 
     private void removeMod() {

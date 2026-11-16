@@ -18,6 +18,8 @@ pub enum Command {
     Recalibrate,
     Swap,
     Exit,
+    /// Recall Fate: back to the start of that turn's player phase (Fire Emblem Awakening)
+    Recall(u16),
 }
 use crate::input::VirtualInput;
 struct State {
@@ -109,6 +111,9 @@ pub extern "system" fn Java_io_github_zakuro_android_Game_nativeKeyboard(
 
 /// Low 4 bits are the command id, the rest is the save-state slot (0 for plain SAVE/LOAD).
 fn decode(command: i32) -> Option<Command> {
+    if command & 15 == 8 {
+        return u16::try_from(command >> 4).ok().filter(|turn| *turn > 0).map(Command::Recall);
+    }
     let slot = u8::try_from(command >> 4).ok().filter(|slot| *slot <= 9)?;
     Some(match command & 15 {
         0 => Command::Pause,
@@ -267,6 +272,19 @@ pub fn record_frame(time: std::time::Duration) {
     FRAME_US[n as usize % FRAME_RING].store(us, Ordering::Relaxed);
     FRAMES_RECORDED.store(n.wrapping_add(1), Ordering::Release);
 }
+/// Recall Fate's turns, newest first (see recall.rs), into `out`; gives how many there are.
+#[no_mangle]
+pub extern "system" fn Java_io_github_zakuro_android_Game_nativeRecallTurns(
+    env: JNIEnv<'_>,
+    _: JObject<'_>,
+    out: jni::objects::JIntArray<'_>,
+) -> jint {
+    let turns: Vec<i32> = crate::recall::turns().into_iter().map(i32::from).collect();
+    let len = (env.get_array_length(&out).unwrap_or(0).max(0) as usize).min(turns.len());
+    let _ = env.set_int_array_region(&out, 0, &turns[..len]);
+    turns.len() as jint
+}
+
 /// Copies the ring into `out` (at most FRAME_RING ints) and returns how many pictures were recorded so
 /// far: entry `n % FRAME_RING` holds picture `n`.
 #[no_mangle]
@@ -297,5 +315,7 @@ mod tests {
         assert!(matches!(decode(2 | 9 << 4), Some(Command::Load(9))));
         assert!(decode(1 | 10 << 4).is_none() && decode(8).is_none() && decode(-1).is_none());
         assert!(matches!(decode(7), Some(Command::Exit)));
+        assert!(matches!(decode(8 | 12 << 4), Some(Command::Recall(12))));
+        assert!(decode(8).is_none());
     }
 }

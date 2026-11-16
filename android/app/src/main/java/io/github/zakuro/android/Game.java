@@ -14,9 +14,12 @@ public final class Game extends NativeActivity {
     // Register bridge exports with ART as well as NativeActivity's native loader.
     static { System.loadLibrary("zakuro_android"); }
     // Shared with bridge.rs.
-    static final int PAUSE=0, SAVE=1, LOAD=2, RESTART=3, RECALIBRATE=4, SWAP=5, RESUME=6, EXIT=7;
+    static final int PAUSE=0, SAVE=1, LOAD=2, RESTART=3, RECALIBRATE=4, SWAP=5, RESUME=6, EXIT=7, RECALL=8;
     private native void nativeCommand(int command);
     private native int nativeFrameTimes(int[] out);
+    private native int nativeRecallTurns(int[] out);
+    /** Recall Fate (Fire Emblem Awakening): the turns whose player phase can be gone back to, newest first */
+    int[] recallTurns() { int[] out=new int[16]; int n=Math.min(nativeRecallTurns(out), out.length); return java.util.Arrays.copyOf(out, n); }
     void command(int command) { nativeCommand(command); }
     Palette palette() { return palette; }
     // ExaltDS: the sidebar replaces the pause grid, and a performance monitor sits in the top-left corner
