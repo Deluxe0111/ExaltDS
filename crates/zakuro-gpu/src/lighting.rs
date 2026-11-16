@@ -4,20 +4,22 @@
 //! and secondary (specular) fragment colors. how each term comes out of the
 //! lookup tables follows what Citra worked out.
 
+use std::sync::atomic::{AtomicU64, Ordering};
+
 pub const REG_ENABLE: usize = 0x08F;
-const REG_LIGHTS: usize = 0x140;
-const REG_GLOBAL_AMBIENT: usize = 0x1C0;
-const REG_LIGHT_COUNT: usize = 0x1C2;
-const REG_CONFIG0: usize = 0x1C3;
-const REG_CONFIG1: usize = 0x1C4;
+pub(crate) const REG_LIGHTS: usize = 0x140;
+pub(crate) const REG_GLOBAL_AMBIENT: usize = 0x1C0;
+pub(crate) const REG_LIGHT_COUNT: usize = 0x1C2;
+pub(crate) const REG_CONFIG0: usize = 0x1C3;
+pub(crate) const REG_CONFIG1: usize = 0x1C4;
 pub const REG_TABLE_INDEX: usize = 0x1C5;
-const REG_DISABLE: usize = 0x1C6;
+pub(crate) const REG_DISABLE: usize = 0x1C6;
 pub const REG_TABLE_DATA: usize = 0x1C8;
 pub const REG_TABLE_DATA_END: usize = 0x1CF;
-const REG_TABLE_ABSOLUTE: usize = 0x1D0;
-const REG_TABLE_INPUT: usize = 0x1D1;
-const REG_TABLE_SCALE: usize = 0x1D2;
-const REG_LIGHT_SLOTS: usize = 0x1D9;
+pub(crate) const REG_TABLE_ABSOLUTE: usize = 0x1D0;
+pub(crate) const REG_TABLE_INPUT: usize = 0x1D1;
+pub(crate) const REG_TABLE_SCALE: usize = 0x1D2;
+pub(crate) const REG_LIGHT_SLOTS: usize = 0x1D9;
 
 /// the tables, the specular distributions, fresnel, the reflections and a
 /// spotlight and a distance attenuation for each light.
@@ -29,7 +31,7 @@ const REFLECT_GREEN: usize = 5;
 const REFLECT_RED: usize = 6;
 const SPOTLIGHT: usize = 8;
 const DISTANCE: usize = 16;
-const TABLES: usize = 24;
+pub(crate) const TABLES: usize = 24;
 
 /// the lookup tables, each entry decoded as it arrives into its value and
 /// the step to the next entry, which interpolates between them.
@@ -38,11 +40,23 @@ pub struct Tables {
     /// goes up with every write that changes an entry, so a copy elsewhere
     /// knows it is stale. titles send the same tables over and over.
     generation: u64,
+    /// the generation each table last changed at, so a copy elsewhere can
+    /// tell which of its tables to look at again.
+    changed: [u64; TABLES],
+    /// which tables these are, so that a generation noted for these is
+    /// never taken for one of another set's.
+    id: u64,
 }
 
 impl Default for Tables {
     fn default() -> Self {
-        Tables { entries: Box::new([[[0.0; 2]; 256]; TABLES]), generation: 0 }
+        static IDS: AtomicU64 = AtomicU64::new(0);
+        Tables {
+            entries: Box::new([[[0.0; 2]; 256]; TABLES]),
+            generation: 0,
+            changed: [0; TABLES],
+            id: IDS.fetch_add(1, Ordering::Relaxed),
+        }
     }
 }
 
@@ -61,26 +75,51 @@ impl Tables {
             table.copy_from_slice(saved);
         }
         self.generation += 1;
+        self.changed = [self.generation; TABLES];
         true
     }
 
     /// takes a write to the table data registers, into the table and entry
     /// the index register names, which then moves on to the next entry.
     pub fn write(&mut self, registers: &mut [u32], value: u32) {
+        self.write_all(registers, [&[value], &[]]);
+    }
+
+    /// takes writes to the table data registers one after another, as
+    /// write does, the index register read and moved on once for all of
+    /// them. titles send whole tables, thousands of entries a frame, a
+    /// command's first word and the burst after it, plain loops over each,
+    /// whose count and entry stay in registers. an iterator's fold the
+    /// compiler sometimes left out of line kept them in memory, each entry
+    /// waiting on the last one's store.
+    pub fn write_all(&mut self, registers: &mut [u32], parts: [&[u32]; 2]) {
         let index = registers[REG_TABLE_INDEX];
-        let entry = (index & 0xFF) as usize;
-        if let Some(table) = self.entries.get_mut(((index >> 8) & 0x1F) as usize) {
-            // a 0.12 value and the step to the next one, an 11-bit magnitude
-            // with the sign above it
-            let step = ((value >> 12) & 0x7FF) as f32 / 2047.0;
-            let step = if value & (1 << 23) != 0 { -step } else { step };
-            let decoded = [(value & 0xFFF) as f32 / 4095.0, step];
-            if table[entry].map(f32::to_bits) != decoded.map(f32::to_bits) {
-                table[entry] = decoded;
-                self.generation += 1;
+        let number = ((index >> 8) & 0x1F) as usize;
+        let mut entry = index as u8;
+        match self.entries.get_mut(number) {
+            Some(table) => {
+                let mut changes = 0;
+                for part in parts {
+                    for &value in part {
+                        // a 0.12 value and the step to the next one, an
+                        // 11-bit magnitude with the sign above it
+                        let step = STEPS[((value >> 12) & 0x7FF) as usize];
+                        let step = if value & (1 << 23) != 0 { -step } else { step };
+                        let decoded = [VALUES[(value & 0xFFF) as usize], step];
+                        let slot = &mut table[entry as usize];
+                        changes += (slot.map(f32::to_bits) != decoded.map(f32::to_bits)) as u64;
+                        *slot = decoded;
+                        entry = entry.wrapping_add(1);
+                    }
+                }
+                if changes > 0 {
+                    self.generation += changes;
+                    self.changed[number] = self.generation;
+                }
             }
+            None => entry = entry.wrapping_add((parts[0].len() + parts[1].len()) as u8),
         }
-        registers[REG_TABLE_INDEX] = (index & !0xFF) | ((entry as u32 + 1) & 0xFF);
+        registers[REG_TABLE_INDEX] = (index & !0xFF) | entry as u32;
     }
 
     /// every entry as a value and a step, table after table.
@@ -92,11 +131,43 @@ impl Tables {
         self.generation
     }
 
+    /// the generation each table last changed at.
+    pub(crate) fn changed(&self) -> &[u64; TABLES] {
+        &self.changed
+    }
+
+    /// which tables these are.
+    pub(crate) fn id(&self) -> u64 {
+        self.id
+    }
+
     fn lookup(&self, table: usize, entry: u8, delta: f32) -> f32 {
         let [value, step] = self.entries[table][entry as usize];
         value + step * delta
     }
 }
+
+/// each 0.12 value of a table entry, as a float.
+static VALUES: [f32; 4096] = {
+    let mut values = [0.0; 4096];
+    let mut i = 0;
+    while i < values.len() {
+        values[i] = i as f32 / 4095.0;
+        i += 1;
+    }
+    values
+};
+
+/// each magnitude of a step to the next entry, as a float.
+static STEPS: [f32; 2048] = {
+    let mut steps = [0.0; 2048];
+    let mut i = 0;
+    while i < steps.len() {
+        steps[i] = i as f32 / 2047.0;
+        i += 1;
+    }
+    steps
+};
 
 /// a PICA float with the given mantissa and exponent widths, where a zero
 /// exponent is not denormal but just the smallest one.
@@ -218,14 +289,15 @@ pub(crate) struct LastLighting {
 }
 
 impl LastLighting {
-    /// the lighting set up in the registers, or None when it is off.
-    pub(crate) fn read(&mut self, registers: &[u32]) -> Option<Lighting> {
+    /// the lighting set up in the registers, or None when it is off, the
+    /// one kept rather than a copy.
+    pub(crate) fn read(&mut self, registers: &[u32]) -> Option<&Lighting> {
         let read = Lighting::registers_read(registers);
         if self.read != Some(read) {
             self.lighting = Lighting::read(registers);
             self.read = Some(read);
         }
-        self.lighting.clone()
+        self.lighting.as_ref()
     }
 }
 
@@ -384,6 +456,89 @@ impl Lighting {
         read
     }
 
+    /// the tables the GPU reads for the lighting, a bit each, as the shader
+    /// goes through them: the lookups on, and each light's spotlight and
+    /// distance tables where it has them. the rest the ring need not hold.
+    pub(crate) fn tables_read(&self) -> u32 {
+        let lookups = [
+            (self.distribution0, DISTRIBUTION0),
+            (self.distribution1, DISTRIBUTION1),
+            (self.fresnel, FRESNEL),
+            (self.reflect[0], REFLECT_RED),
+            (self.reflect[1], REFLECT_GREEN),
+            (self.reflect[2], REFLECT_BLUE),
+        ];
+        let mut read = lookups.iter().filter(|(lookup, _)| lookup.is_some()).fold(0, |read, &(_, table)| read | 1 << table);
+        for light in self.lights() {
+            if light.spotlight {
+                read |= 1 << (SPOTLIGHT + light.number);
+            }
+            if light.distance.is_some() {
+                read |= 1 << (DISTANCE + light.number);
+            }
+        }
+        read
+    }
+
+    /// what the lighting does, for the GPU's per-class times: lights, then each lookup table
+    /// in use with its input (d0, d1, fr, rr, rg, rb, sp).
+    pub(crate) fn summary(&self) -> String {
+        let names = ["d0", "d1", "fr", "rr", "rg", "rb", "sp"];
+        let tables = [self.distribution0, self.distribution1, self.fresnel].into_iter().chain(self.reflect).chain([Some(self.spotlight)]);
+        let used: Vec<String> = names
+            .iter()
+            .zip(tables)
+            .filter_map(|(name, table)| table.map(|lookup| format!("{name}:{}", lookup.input)))
+            .collect();
+        let distance = self.lights().iter().filter(|light| light.distance.is_some()).count();
+        let spot = self.lights().iter().filter(|light| light.spotlight).count();
+        format!("{} lights ({distance} distance, {spot} spot) tables [{}] bump {} shadow {}", self.light_count, used.join(" "), !matches!(self.bump, Bump::None), self.shadow.is_some())
+    }
+
+    /// the lights the shader goes through and the lookups it reads (input, abs, scale), as
+    /// the uniforms and the shape both hold them. development experiments (crate::EXPERIMENT):
+    /// 65536 lights only the first light, 32768 turns every lookup table off, to measure what
+    /// lighting costs on a device.
+    fn as_drawn(&self) -> (usize, [Option<Lookup>; 7]) {
+        let experiment = crate::EXPERIMENT.load(std::sync::atomic::Ordering::Relaxed);
+        let light_count = if experiment & 65536 != 0 { self.light_count.min(1) } else { self.light_count };
+        let tables = [self.distribution0, self.distribution1, self.fresnel, self.reflect[0], self.reflect[1], self.reflect[2], Some(self.spotlight)];
+        (light_count, if experiment & 32768 != 0 { [None; 7] } else { tables })
+    }
+
+    /// the shape of the lighting as raster.frag's LIGHTING and LIGHT_LOOKUPS specialization
+    /// constants (see there), the same values pack puts in the uniforms, so a pipeline made for
+    /// them draws what one reading the uniforms draws.
+    pub(crate) fn shape(&self) -> (u32, u32) {
+        let (light_count, tables) = self.as_drawn();
+        let lights = &self.lights[..light_count];
+        let any = |has: fn(&Light) -> bool| lights.iter().any(has) as u32;
+        let mut lighting = 1
+            | 2
+            | (light_count as u32 - 1) << 2
+            | ((self.config == 8) as u32) << 5
+            | (self.fresnel_primary as u32) << 6
+            | (self.fresnel_secondary as u32) << 7
+            | (self.clamp_highlights as u32) << 8
+            | (self.needs_half as u32) << 9
+            | (self.needs_view as u32) << 10
+            | (!matches!(self.bump, Bump::None) as u32) << 11
+            | (self.shadow.is_some() as u32) << 12
+            | any(|light| light.distance.is_some()) << 13
+            | any(|light| light.spotlight) << 14
+            | any(|light| light.geometric0 || light.geometric1) << 15
+            | any(|light| light.shadowed) << 16
+            | any(|light| light.two_sided) << 17;
+        let mut inputs = 0;
+        for (i, table) in tables.iter().enumerate() {
+            if let Some(lookup) = table {
+                lighting |= 1 << (20 + i);
+                inputs |= (lookup.input & 7 | (lookup.absolute as u32) << 3) << (4 * i);
+            }
+        }
+        (lighting, inputs)
+    }
+
     /// the lighting as the words of the hardware renderer's uniform block,
     /// in the order its shader declares them.
     pub(crate) fn pack(&self, words: &mut Vec<u32>) {
@@ -399,22 +554,16 @@ impl Lighting {
                 | (shadow.secondary as u32) << 10
                 | (shadow.alpha as u32) << 11
         });
-        words.extend([self.config, self.light_count as u32, bump, shadow]);
+        let (light_count, tables) = self.as_drawn();
+        words.extend([self.config, light_count as u32, bump, shadow]);
         words.extend([
             self.fresnel_primary as u32,
             self.fresnel_secondary as u32,
             self.clamp_highlights as u32,
             self.needs_half as u32 | (self.needs_view as u32) << 1,
         ]);
-        let lookup = |lookup: Option<Lookup>| {
-            lookup.map_or([0; 4], |lookup| [1, lookup.input, lookup.absolute as u32, lookup.scale.to_bits()])
-        };
-        for table in [self.distribution0, self.distribution1, self.fresnel]
-            .into_iter()
-            .chain(self.reflect)
-            .chain([Some(self.spotlight)])
-        {
-            words.extend(lookup(table));
+        for table in tables {
+            words.extend(table.map_or([0; 4], |lookup| [1, lookup.input, lookup.absolute as u32, lookup.scale.to_bits()]));
         }
         let vector = |v: [f32; 3]| [v[0].to_bits(), v[1].to_bits(), v[2].to_bits(), 0];
         words.extend(vector(self.global_ambient));
@@ -587,6 +736,25 @@ impl Lighting {
 mod tests {
     use super::*;
 
+    /// the tables the GPU reads for a draw are the lookups it has on and
+    /// the spotlight and distance tables of the lights it lights with.
+    #[test]
+    fn a_draw_reads_the_tables_of_its_lookups_and_lights() {
+        let mut registers = vec![0u32; 0x200];
+        registers[REG_ENABLE] = 1;
+        // the configuration with every lookup
+        registers[REG_CONFIG0] = 8 << 4;
+        // two lights, 5 and 2, of the eight
+        registers[REG_LIGHT_COUNT] = 1;
+        registers[REG_LIGHT_SLOTS] = 0x25;
+        // the second distribution, fresnel and blue off, light 5's
+        // spotlight off and light 2's distance
+        registers[REG_CONFIG1] = 1 << 17 | 1 << 19 | 1 << 22 | 1 << (8 + 5) | 1 << (24 + 2);
+        let lighting = Lighting::read(&registers).expect("lighting on");
+        let expected = 1 << DISTRIBUTION0 | 1 << REFLECT_RED | 1 << REFLECT_GREEN | 1 << (SPOTLIGHT + 2) | 1 << (DISTANCE + 5);
+        assert_eq!(lighting.tables_read(), expected);
+    }
+
     #[test]
     fn half_floats_decode() {
         assert_eq!(pica_float(0x3C00, 10, 5), 1.0);
@@ -610,6 +778,41 @@ mod tests {
     /// titles send the same tables again and again, which leaves what the
     /// GPU has of them as it is, and only a changed entry makes it stale.
     #[test]
+    fn writes_in_one_go_leave_what_writes_one_at_a_time_do() {
+        let mut seed = 7u32;
+        let mut random = move || {
+            seed = seed.wrapping_mul(1_103_515_245).wrapping_add(12345);
+            seed
+        };
+        let (mut one, mut all) = (Tables::default(), Tables::default());
+        let (mut ones, mut alls) = (vec![0u32; 0x200], vec![0u32; 0x200]);
+        for round in 0..200 {
+            // past the end of a table, into one there is not, and the same
+            // entries again
+            let index = (random() >> 8) & 0x1FFF;
+            let values: Vec<u32> = (0..random() % 300).map(|i| if round % 3 == 0 { i * 0x1001 } else { random() }).collect();
+            ones[REG_TABLE_INDEX] = index | 0xABC0_0000;
+            alls[REG_TABLE_INDEX] = index | 0xABC0_0000;
+            values.iter().for_each(|&value| one.write(&mut ones, value));
+            let split = values.len().min(1 + round % 3);
+            all.write_all(&mut alls, [&values[..split], &values[split..]]);
+            assert_eq!(alls[REG_TABLE_INDEX], ones[REG_TABLE_INDEX], "round {round}");
+            assert_eq!((all.generation(), all.changed()), (one.generation(), one.changed()), "round {round}");
+            assert!(all.saved().iter().zip(one.saved()).all(|(a, b)| a.map(f32::to_bits) == b.map(f32::to_bits)), "round {round}");
+        }
+        // and the table decodes as it did with divisions
+        let mut registers = vec![0u32; 0x200];
+        for value in [0, 1, 0xFFF, 0x7FF000, 0x800000, 0xFFFFFF, 0x123456, 0xABCDEF] {
+            registers[REG_TABLE_INDEX] = 2 << 8;
+            one.write(&mut registers, value);
+            let step = ((value >> 12) & 0x7FF) as f32 / 2047.0;
+            let step = if value & (1 << 23) != 0 { -step } else { step };
+            let expected = [(value & 0xFFF) as f32 / 4095.0, step];
+            assert_eq!(one.entries()[2][0].map(f32::to_bits), expected.map(f32::to_bits), "{value:06X}");
+        }
+    }
+
+    #[test]
     fn only_a_changed_entry_makes_the_tables_stale() {
         let mut registers = vec![0u32; 0x200];
         let mut tables = Tables::default();
@@ -621,8 +824,16 @@ mod tests {
         values.iter().for_each(|&value| tables.write(&mut registers, value));
         assert_eq!(tables.generation(), sent);
         registers[REG_TABLE_INDEX] = (5 << 8) | 1;
+        let changed = *tables.changed();
         tables.write(&mut registers, 2048);
         assert_ne!(tables.generation(), sent);
+        // and only its own table is noted as changed
+        let mut expected = changed;
+        expected[5] = tables.generation();
+        assert_eq!(*tables.changed(), expected);
+        assert!(tables.restore(&tables.saved()));
+        assert_eq!(*tables.changed(), [tables.generation(); TABLES], "a restore changes every table");
+        assert_ne!(Tables::default().id(), tables.id());
     }
 
     /// the lighting kept from the last draw is the one the registers set

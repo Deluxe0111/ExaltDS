@@ -11,6 +11,7 @@ import org.json.JSONObject;
 /**
  * Developer settings access over adb, guarded by the DUMP permission (adb shell/system only):
  * {@code adb shell am broadcast -n io.github.zakuro.android/.DebugSettings --es game ID [--es set '{"resolution":2}']}
+ * ({@code "enhancements":["16:9"]} replaces the game's enabled enhancements; names are matched at launch)
  * or {@code --ez list true}. Result data is JSON with code 0, an error text with code 1 (invalid input, nothing written)
  * or code 2 (unknown game). Changes are stored like the UI does and apply at the next game launch: the game runs in
  * the separate :game process and reads its settings only when it starts.
@@ -24,6 +25,8 @@ public final class DebugSettings extends BroadcastReceiver {
             if (id == null || !id.matches("[0-9A-Fa-f]{16}") || !ids(context).contains(id = id.toUpperCase(Locale.ROOT))) {
                 setResult(2, "Unknown game " + id, null); return;
             }
+            String transfer = intent.getStringExtra("transfer");
+            if (transfer != null) { setResult(0, transfer(context, id, transfer), null); return; }
             GameSettings settings = GameSettings.load(context, id);
             String set = intent.getStringExtra("set");
             if (set != null) {
@@ -37,6 +40,35 @@ public final class DebugSettings extends BroadcastReceiver {
         } catch (RuntimeException e) {
             setResult(1, e.toString(), null);
         }
+    }
+    /**
+     * {@code --es transfer out} copies the game's in-game saves and save states to this app's external files
+     * (Android/data/<package>/files/transfer/<id>/{user,states}), where adb can pull them; {@code in} copies them back
+     * from there, replacing the current ones. Moves a game's saves between Zakuroishi and ExaltDS. Close the game first.
+     */
+    private static String transfer(Context context, String id, String direction) {
+        try (SaveArchive.Guard ignored = SaveArchive.lock(context.getFilesDir(), id)) {
+            File outside = new File(context.getExternalFilesDir(null), "transfer/" + id);
+            File user = new File(context.getFilesDir(), "savedata/" + id + "/user");
+            File states = new File(GameImport.active(context, id), "data/states/" + id);
+            if (direction.equals("out")) {
+                GameImport.remove(outside);
+                if (user.isDirectory()) GameImport.copyTree(user, new File(outside, "user"));
+                if (states.isDirectory()) GameImport.copyTree(states, new File(outside, "states"));
+                readable(outside); // copies keep the private files' 0600, which adb cannot read
+            } else if (direction.equals("in")) {
+                File inUser = new File(outside, "user"), inStates = new File(outside, "states");
+                if (inUser.isDirectory()) { GameImport.remove(user); GameImport.copyTree(inUser, user); }
+                if (inStates.isDirectory()) { GameImport.remove(states); GameImport.copyTree(inStates, states); }
+            } else throw new IllegalArgumentException("transfer must be out or in");
+            return "{\"transfer\":\"" + direction + "\",\"path\":\"" + outside + "\"}";
+        } catch (IllegalArgumentException e) { throw e; }
+        catch (Exception e) { throw new IllegalArgumentException("transfer failed: " + e); }
+    }
+    private static void readable(File f) {
+        f.setReadable(true, false);
+        File[] kids = f.listFiles();
+        if (kids != null) for (File k : kids) readable(k);
     }
     private static Set<String> ids(Context context) {
         File[] files = new File(context.getFilesDir(), "imports").listFiles(); Set<String> found = new TreeSet<>();
@@ -63,7 +95,7 @@ public final class DebugSettings extends BroadcastReceiver {
             out.append('"').append(setting.key).append("\":");
             if (value instanceof String) out.append('"').append(value).append('"'); else out.append(value);
         }
-        return out.append("}}").toString();
+        return out.append("},\"enhancements\":").append(new JSONArray(s.enhancements)).append('}').toString();
     }
     /** Validates every change first and only then mutates settings; on any problem throws IllegalArgumentException and leaves them untouched. */
     static void apply(GameSettings s, Map<String, Object> changes) {
@@ -73,7 +105,7 @@ public final class DebugSettings extends BroadcastReceiver {
             switch (key) {
                 case "resolution":
                     if (!(value instanceof Number) || ((Number) value).doubleValue() != Math.rint(((Number) value).doubleValue())
-                        || ((Number) value).intValue() < 1 || ((Number) value).intValue() > 3) throw new IllegalArgumentException("resolution must be an integer 1-3");
+                        || ((Number) value).intValue() < 1 || ((Number) value).intValue() > 4) throw new IllegalArgumentException("resolution must be an integer 1-4");
                     staged.put(key, ((Number) value).intValue()); break;
                 case "textures":
                     if (!(value instanceof Boolean)) throw new IllegalArgumentException("textures must be true or false");
@@ -82,6 +114,17 @@ public final class DebugSettings extends BroadcastReceiver {
                     if (!(value instanceof String) || !(((String) value).isEmpty() || ((String) value).matches("[0-9a-fA-F-]{36}")))
                         throw new IllegalArgumentException("driver must be an imported driver id or empty");
                     staged.put(key, value); break;
+                case "enhancements": {
+                    // the same limits GameSettings.load keeps
+                    if (!(value instanceof JSONArray) || ((JSONArray) value).length() > 32) throw new IllegalArgumentException("enhancements must be a list of at most 32 names");
+                    List<String> names = new ArrayList<>();
+                    for (int i = 0; i < ((JSONArray) value).length(); i++) {
+                        Object name = ((JSONArray) value).opt(i);
+                        if (!(name instanceof String) || ((String) name).isEmpty() || ((String) name).length() > 120) throw new IllegalArgumentException("enhancement names must be 1-120 characters");
+                        names.add((String) name);
+                    }
+                    staged.put(key, names); break;
+                }
                 default: {
                     GameSettings.Setting setting = null;
                     for (GameSettings.Setting candidate : GameSettings.ALL) if (candidate.key.equals(key)) setting = candidate;
@@ -95,6 +138,7 @@ public final class DebugSettings extends BroadcastReceiver {
                 case "resolution": s.resolution = (Integer) change.getValue(); break;
                 case "textures": s.textures = (Boolean) change.getValue(); break;
                 case "driver": s.driver = (String) change.getValue(); break;
+                case "enhancements": { s.enhancements.clear(); @SuppressWarnings("unchecked") List<String> names = (List<String>) change.getValue(); s.enhancements.addAll(names); break; }
                 default: s.values.put(change.getKey(), change.getValue());
             }
         }

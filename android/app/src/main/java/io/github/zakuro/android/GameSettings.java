@@ -139,7 +139,7 @@ final class GameSettings {
         Object selectedDriver = prefs.get(id + ".driver");
         if (selectedDriver instanceof String && ((String)selectedDriver).matches("[0-9a-fA-F-]{36}")) settings.driver = (String)selectedDriver;
         Object scale = prefs.get(id + ".resolution");
-        settings.resolution = scale instanceof Integer ? Math.max(1, Math.min(3, (Integer) scale)) : 1;
+        settings.resolution = scale instanceof Integer ? Math.max(1, Math.min(4, (Integer) scale)) : 1;
         Object texture = prefs.get(id + ".textures"); settings.textures = !(texture instanceof Boolean) || (Boolean) texture;
         for (Setting setting : ALL) settings.values.put(setting.key, setting.normalize(prefs.get(id + ".advanced." + setting.key)));
         Object enabled = prefs.get(id + ".advanced.enhancements");

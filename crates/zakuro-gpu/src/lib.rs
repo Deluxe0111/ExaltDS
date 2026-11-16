@@ -28,6 +28,12 @@ pub use backend::{layout, place, GpuScreen, Overlay, OverlayMesh, OverlayTexture
 pub use renderer::{DrawCall, Renderer, RendererKind, SoftwareRenderer};
 #[cfg(feature = "vulkan")]
 pub use device::SharedDevice;
+
+/// development A/B switches for measuring the renderer on a device, 0 in normal use. bits:
+/// 1 leaves out alpha-tested draws, 2 drops depth at the end of each render pass,
+/// 4 leaves out blended draws, 8 leaves out every draw with a depth buffer. render passes,
+/// barriers and staging stay as they are, only the draw calls go.
+pub static EXPERIMENT: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(0);
 #[cfg(feature = "vulkan")]
 pub use raster::hardware::{take_caller_stats, take_wait_stats};
 
@@ -186,6 +192,23 @@ pub struct ScreenRef {
     pub(crate) columns: u32,
 }
 
+/// a texture copy, by its physical addresses and size, that a title makes of its finished 3D
+/// scene, its input, right where it would have laid its glow over it, which an enhancement
+/// left out. the scene is brightened and saturated before the copy, as the glow did and
+/// without its haze, and before the title draws its 2D over it.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct ToneCopy {
+    pub input: u32,
+    pub output: u32,
+    pub size: u32,
+    /// how much the scene is lifted, 0 to 1, then its gain, its contrast about middle grey
+    /// and its saturation, 1 leaving each as it is, see tone.comp.
+    pub lift: f32,
+    pub gain: f32,
+    pub contrast: f32,
+    pub saturation: f32,
+}
+
 pub struct Gpu {
     /// external registers, 0x1EF00000 upwards, indexed by word.
     pub external: Box<[u32]>,
@@ -199,6 +222,9 @@ pub struct Gpu {
     /// attribute registers.
     fixed_attributes: [shader::Vec4; 16],
     fixed_attribute_staging: [u32; 3],
+    /// the texture copy a title makes of its 3D scene where it would have drawn the glow it
+    /// was made to leave out, which brightens the scene first, see set_tone.
+    tone: Option<ToneCopy>,
     fixed_attribute_words: usize,
     /// vertices sent through the same registers in immediate mode.
     immediate: Immediate,
@@ -253,6 +279,7 @@ impl Gpu {
             geometry_shader: shader::ShaderUnit::new(),
             fixed_attributes: [[0.0, 0.0, 0.0, 1.0]; 16],
             fixed_attribute_staging: [0; 3],
+            tone: None,
             fixed_attribute_words: 0,
             immediate: Immediate::default(),
             pending_jump: None,
@@ -488,10 +515,11 @@ impl Gpu {
             };
             match hardware.display_transfer(memory, &transfer) {
                 Ok(true) => {
+                    log::debug!("display transfer from 0x{input_paddr:08X} on the GPU");
                     self.transfers += 1;
                     return;
                 }
-                Ok(false) => {}
+                Ok(false) => log::debug!("display transfer from 0x{input_paddr:08X} on the CPU"),
                 Err(error) => log::error!("the GPU could not transfer a buffer, {error}"),
             }
         }
@@ -603,13 +631,60 @@ impl Gpu {
         // every line and the gaps between them
         let span = |width: u32, skip: u32| if width == 0 { size } else { size + size.div_ceil(width) * skip };
         let (input, output) = (memory.translate(input_paddr), memory.translate(output_paddr));
-        self.sync_memory(memory, input, span(input_width, input_skip));
         let output_width = (output_gap & 0xFFFF) * 16;
         let output_skip = (output_gap >> 16) * 16;
+
+        // one contiguous run out of a buffer the host GPU drew stays on the
+        // GPU, at the render scale, see Hardware::texture_copy
+        // lines of whole tiles out of a buffer the host GPU drew, into a dense
+        // output, are a rectangle of it, see Hardware::strided_texture_copy
+        #[cfg(feature = "vulkan")]
+        // experiment 262144: strided copies take the CPU path, as before patch 0005 (D3), for A/B
+        if input_skip != 0 && output_skip == 0 && (output_width == 0 || output_width == input_width)
+            && EXPERIMENT.load(std::sync::atomic::Ordering::Relaxed) & 262144 == 0
+        {
+            if let Some(hardware) = self.resources.hardware.as_mut() {
+                match hardware.strided_texture_copy(memory, input, output, size, input_width, input_skip) {
+                    Ok(true) => {
+                        log::debug!("texture copy: 0x{input_paddr:08X} -> 0x{output_paddr:08X} size 0x{size:X} line 0x{input_width:X} skip 0x{input_skip:X} strided on the GPU");
+                        self.transfers += 1;
+                        return;
+                    }
+                    Ok(false) => {}
+                    Err(error) => log::error!("the GPU could not copy a texture, {error}"),
+                }
+            }
+        }
+
+        #[cfg(feature = "vulkan")]
+        if let (Some(tone), Some(hardware)) = (self.tone, self.resources.hardware.as_mut()) {
+            if (input_paddr, output_paddr, size) == (tone.input, tone.output, tone.size) && input_skip == 0 {
+                if let Err(error) = hardware.tone(memory, input, size, &tone) {
+                    log::error!("the GPU could not brighten the scene, {error}");
+                }
+            }
+        }
+
+        #[cfg(feature = "vulkan")]
+        if input_skip == 0 && output_skip == 0 {
+            if let Some(hardware) = self.resources.hardware.as_mut() {
+                match hardware.texture_copy(memory, input, output, size) {
+                    Ok(true) => {
+                        log::debug!("texture copy: 0x{input_paddr:08X} -> 0x{output_paddr:08X} size 0x{size:X} on the GPU");
+                        self.transfers += 1;
+                        return;
+                    }
+                    Ok(false) => {}
+                    Err(error) => log::error!("the GPU could not copy a texture, {error}"),
+                }
+            }
+        }
+
+        self.sync_memory(memory, input, span(input_width, input_skip));
         self.sync_memory(memory, output, span(output_width, output_skip));
 
         log::debug!(
-            "texture copy: 0x{input_paddr:08X} -> 0x{output_paddr:08X} size 0x{size:X}"
+            "texture copy: 0x{input_paddr:08X} -> 0x{output_paddr:08X} size 0x{size:X} in {input_width}+{input_skip} out {output_width}+{output_skip}"
         );
 
         let (mut src, mut dst) = (input, output);
@@ -731,6 +806,12 @@ impl Gpu {
             return true;
         }
         false
+    }
+
+    /// the copy that marks where a title's 3D scene is brightened, from the next one on,
+    /// none to stop.
+    pub fn set_tone(&mut self, tone: Option<ToneCopy>) {
+        self.tone = tone;
     }
 
     /// whether the screens the host's GPU draws are shown straight from it,
@@ -1090,9 +1171,7 @@ impl Gpu {
             }
             lighting::REG_TABLE_DATA..=lighting::REG_TABLE_DATA_END if last <= lighting::REG_TABLE_DATA_END => {
                 self.flush_immediate(memory);
-                for &word in words() {
-                    self.resources.light_tables.write(&mut self.internal, word);
-                }
+                self.resources.light_tables.write_all(&mut self.internal, [std::slice::from_ref(&first), burst]);
             }
             proctex::REG_TABLE_DATA..=proctex::REG_TABLE_DATA_END if last <= proctex::REG_TABLE_DATA_END => {
                 self.flush_immediate(memory);

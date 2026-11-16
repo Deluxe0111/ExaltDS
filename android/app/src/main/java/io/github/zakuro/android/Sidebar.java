@@ -1,0 +1,506 @@
+package io.github.zakuro.android;
+
+import android.animation.Animator;
+import android.animation.AnimatorListenerAdapter;
+import android.app.AlertDialog;
+import android.app.Dialog;
+import android.content.Intent;
+import android.graphics.Color;
+import android.graphics.Typeface;
+import android.graphics.drawable.ColorDrawable;
+import android.graphics.drawable.GradientDrawable;
+import android.graphics.drawable.StateListDrawable;
+import android.net.Uri;
+import android.view.*;
+import android.widget.*;
+import java.io.File;
+import java.util.*;
+
+/**
+ * ExaltDS's in-game menu: a panel that slides in from the left (Back, or the controller's menu button), after Somniel's
+ * sidebar. Plain Android views in a full-screen dialog over the game, which pauses while it is open.
+ *
+ * Live: the performance monitor. Saved at once and applied by "Apply and restart" (the game reads them at start): combat
+ * frame rate, 16:9, feet, resolution, HD textures, mods and the GPU driver.
+ */
+final class Sidebar {
+    static final int PICK_MOD = 0x5100, PICK_DRIVER = 0x5101;
+    private static final String[] COMBAT = {"30 fps (original)", "60 fps, original speed", "60 fps, faster"};
+    private static final String[] PERF = {"Off", "FPS", "FPS + frame time", "FPS + frame time + temps"};
+
+    private final Game game;
+    private final String id;
+    private final float dp;
+    private Dialog dialog;
+    private FrameLayout root;
+    private View scrim;
+    private LinearLayout panel, main, mods, drivers;
+    private ScrollView scroll;
+    private boolean open, handedOff, busy;
+    private GameSettings s;
+    /** what this run started with, to tell which changes need a restart */
+    private final String started;
+    private boolean modsChanged;
+    private Button apply;
+    private TextView modsStatus, driverStatus;
+    private LinearLayout modsList;
+
+    Sidebar(Game game, String id) {
+        this.game = game; this.id = id;
+        dp = game.getResources().getDisplayMetrics().density;
+        s = GameSettings.load(game, id);
+        started = snapshot(s);
+    }
+
+    private static String snapshot(GameSettings s) { return s.json() + "|" + s.resolution + "|" + s.textures + "|" + s.driver; }
+    private int px(float v) { return Math.round(v * dp); }
+    boolean isOpen() { return open; }
+
+    // ---- open and close ----
+
+    void open() {
+        if (open || game.isFinishing()) return;
+        open = true; handedOff = false;
+        s = GameSettings.load(game, id);
+        game.command(Game.PAUSE);
+        build();
+        dialog = new Dialog(game, android.R.style.Theme_Translucent_NoTitleBar_Fullscreen);
+        dialog.setContentView(root);
+        dialog.setOnKeyListener((d, code, e) -> key(code, e));
+        dialog.setOnDismissListener(d -> { dialog = null; if (open) { open = false; if (!handedOff) game.command(Game.RESUME); } });
+        Window w = dialog.getWindow();
+        w.setBackgroundDrawable(new ColorDrawable(Color.TRANSPARENT));
+        w.setLayout(-1, -1);
+        w.addFlags(WindowManager.LayoutParams.FLAG_LAYOUT_IN_SCREEN | WindowManager.LayoutParams.FLAG_LAYOUT_NO_LIMITS);
+        w.getAttributes().layoutInDisplayCutoutMode = WindowManager.LayoutParams.LAYOUT_IN_DISPLAY_CUTOUT_MODE_ALWAYS;
+        dialog.show();
+        w.setDecorFitsSystemWindows(false);
+        if (w.getInsetsController() != null) {
+            w.getInsetsController().hide(WindowInsets.Type.systemBars());
+            w.getInsetsController().setSystemBarsBehavior(WindowInsetsController.BEHAVIOR_SHOW_TRANSIENT_BARS_BY_SWIPE);
+        }
+        panel.setTranslationX(-px(360));
+        panel.animate().translationX(0).setDuration(180).setListener(null).start();
+        scrim.setAlpha(0f);
+        scrim.animate().alpha(1f).setDuration(180).start();
+        show(main);
+    }
+
+    void dismissNow() { if (dialog != null) { handedOff = true; dialog.dismiss(); } }
+
+    /** Closes the panel; the game resumes unless an action hands the pause to a dialog of its own. */
+    void close() { close(false); }
+    private void close(boolean handOff) {
+        if (!open || dialog == null) return;
+        handedOff = handOff;
+        Dialog d = dialog;
+        scrim.animate().alpha(0f).setDuration(140).start();
+        panel.animate().translationX(-px(360)).setDuration(140).setListener(new AnimatorListenerAdapter() {
+            @Override public void onAnimationEnd(Animator a) { d.dismiss(); }
+        }).start();
+    }
+
+    private boolean key(int code, KeyEvent e) {
+        boolean up = e.getAction() == KeyEvent.ACTION_UP;
+        if (code == KeyEvent.KEYCODE_BACK || code == KeyEvent.KEYCODE_BUTTON_B) { if (up) back(); return true; }
+        if (code == KeyEvent.KEYCODE_BUTTON_MODE || code == KeyEvent.KEYCODE_BUTTON_START) { if (up) close(); return true; }
+        if (code == KeyEvent.KEYCODE_BUTTON_A) {
+            View f = dialog == null ? null : dialog.getCurrentFocus();
+            if (up && f != null) f.performClick();
+            return true;
+        }
+        if (code == KeyEvent.KEYCODE_BUTTON_L1 || code == KeyEvent.KEYCODE_BUTTON_R1) {
+            if (up) scroll.pageScroll(code == KeyEvent.KEYCODE_BUTTON_L1 ? View.FOCUS_UP : View.FOCUS_DOWN);
+            return true;
+        }
+        return false;
+    }
+
+    private void back() { if (main.getVisibility() == View.VISIBLE) close(); else show(main); }
+
+    private void show(LinearLayout page) {
+        // back on the main page: rebuild it, so rows that depend on an import (feet, HD textures) are current
+        if (page == main && main.getVisibility() != View.VISIBLE) { main.removeAllViews(); buildMain(); refreshApply(); }
+        for (LinearLayout p : new LinearLayout[]{main, mods, drivers}) p.setVisibility(p == page ? View.VISIBLE : View.GONE);
+        if (page == mods) refreshMods();
+        if (page == drivers) refreshDrivers();
+        scroll.scrollTo(0, 0);
+        View first = null;
+        for (int i = 0; i < page.getChildCount() && first == null; i++) {
+            View v = page.getChildAt(i);
+            if (v.getVisibility() == View.VISIBLE && v.isFocusable() && v.isEnabled()) first = v;
+        }
+        if (first != null) { View f = first; f.post(f::requestFocusFromTouch); } // the Thor stays in touch mode; plain requestFocus shows no ring
+    }
+
+    // ---- layout ----
+
+    private void build() {
+        root = new FrameLayout(game);
+        scrim = new View(game);
+        scrim.setBackgroundColor(0x99000000);
+        scrim.setOnClickListener(v -> close());
+        root.addView(scrim, new FrameLayout.LayoutParams(-1, -1));
+
+        panel = new LinearLayout(game);
+        panel.setOrientation(LinearLayout.VERTICAL);
+        GradientDrawable bg = new GradientDrawable(GradientDrawable.Orientation.TOP_BOTTOM, new int[]{Exalt.PANEL_TOP, Exalt.PANEL_BOTTOM});
+        float r = px(18);
+        bg.setCornerRadii(new float[]{0, 0, r, r, r, r, 0, 0});
+        panel.setBackground(bg);
+        panel.setClipToOutline(true);
+        panel.setClickable(true);
+        root.addView(panel, new FrameLayout.LayoutParams(px(360), -1, Gravity.START));
+
+        TextView title = text("ExaltDS", 22, Exalt.INK);
+        title.setTypeface(Typeface.DEFAULT_BOLD);
+        String version = "";
+        try { version = "  v" + game.getPackageManager().getPackageInfo(game.getPackageName(), 0).versionName; } catch (Exception ignored) { }
+        android.text.SpannableString ss = new android.text.SpannableString("ExaltDS" + version);
+        ss.setSpan(new android.text.style.RelativeSizeSpan(0.55f), 7, ss.length(), 0);
+        ss.setSpan(new android.text.style.ForegroundColorSpan(Exalt.MUTED), 7, ss.length(), 0);
+        ss.setSpan(new android.text.style.StyleSpan(Typeface.NORMAL), 7, ss.length(), 0);
+        title.setText(ss);
+        title.setPadding(px(20), px(14), px(20), px(4));
+        panel.addView(title);
+        View accent = new View(game);
+        GradientDrawable ab = new GradientDrawable();
+        ab.setColor(Exalt.GOLD); ab.setCornerRadius(px(2));
+        accent.setBackground(ab);
+        LinearLayout.LayoutParams alp = new LinearLayout.LayoutParams(px(32), px(3));
+        alp.setMargins(px(20), px(2), 0, px(8));
+        panel.addView(accent, alp);
+
+        main = column(); mods = column(); drivers = column();
+        LinearLayout pages = column();
+        pages.addView(main); pages.addView(mods); pages.addView(drivers);
+        scroll = new ScrollView(game);
+        scroll.setVerticalScrollBarEnabled(false);
+        scroll.addView(pages);
+        panel.addView(scroll, new LinearLayout.LayoutParams(-1, 0, 1f));
+        buildMain(); buildMods(); buildDrivers();
+        refreshApply();
+    }
+
+    private void buildMain() {
+        apply = row("Apply and restart", v -> restart());
+        apply.setTextColor(Exalt.GOLD);
+        apply.setTypeface(Typeface.DEFAULT_BOLD);
+        main.addView(apply);
+        main.addView(row("Resume", v -> close()));
+        main.addView(row("Save state", v -> { game.command(Game.SAVE); close(); }));
+        main.addView(row("Load state", v -> { close(true); game.confirmLoad(); }));
+        main.addView(row("Save to slot…", v -> { close(true); game.slotMenu(true); }));
+        main.addView(row("Load from slot…", v -> { close(true); game.slotMenu(false); }));
+        main.addView(divider());
+
+        // performance monitor: live
+        TextView perfLabel = label("Performance monitor: " + PERF[Exalt.perfLevel(game)]);
+        main.addView(perfLabel);
+        SeekBar perf = seek(3, Exalt.perfLevel(game));
+        perf.setOnSeekBarChangeListener(new SeekBar.OnSeekBarChangeListener() {
+            @Override public void onProgressChanged(SeekBar b, int p, boolean user) {
+                perfLabel.setText("Performance monitor: " + PERF[p]);
+                Exalt.prefs(game).edit().putInt("perf_level", p).apply();
+                game.setPerfLevel(p);
+            }
+            @Override public void onStartTrackingTouch(SeekBar b) { }
+            @Override public void onStopTrackingTouch(SeekBar b) { }
+        });
+        main.addView(perf, new LinearLayout.LayoutParams(-1, px(40)));
+        main.addView(divider());
+
+        main.addView(label("Takes effect after Apply and restart"));
+        Button combat = row("", null);
+        combat.setText("Combat: " + COMBAT[Exalt.combat(s)] + "  ▾");
+        combat.setOnClickListener(v -> choose(combat, COMBAT, Exalt.combat(s), i -> {
+            Exalt.setCombat(s, i); save(); combat.setText("Combat: " + COMBAT[i] + "  ▾");
+        }));
+        main.addView(combat);
+        String[] scales = {"1× (native)", "2×", "3×", "4×"};
+        Button res = row("", null);
+        res.setText("Resolution: " + scales[s.resolution - 1] + "  ▾");
+        res.setOnClickListener(v -> choose(res, scales, s.resolution - 1, i -> {
+            s.resolution = i + 1; save(); res.setText("Resolution: " + scales[i] + "  ▾");
+        }));
+        main.addView(res);
+        main.addView(check("16:9 widescreen", Exalt.wide(s), on -> { Exalt.setWide(s, on); save(); }));
+        Exalt.Layer feet = Exalt.feet(game, id);
+        CheckBox feetBox = check("Feet on the ground (feet mod)", feet != null && feet.on, on -> {
+            Exalt.Layer f = Exalt.feet(game, id);
+            if (f != null) { Exalt.setOn(game, id, f.name, on); modsChanged = true; refreshApply(); }
+        });
+        if (feet == null) { feetBox.setEnabled(false); feetBox.setAlpha(0.45f); feetBox.setText("Feet mod: import it in Mods / textures"); }
+        main.addView(feetBox);
+        boolean pack = hasPack();
+        CheckBox hd = check("HD textures", pack && s.textures, on -> { s.textures = on; save(); });
+        if (!pack) { hd.setEnabled(false); hd.setAlpha(0.45f); hd.setText("HD textures: import a pack in Mods / textures"); }
+        main.addView(hd);
+        main.addView(divider());
+
+        main.addView(row("Mods / textures…", v -> show(mods)));
+        main.addView(row("GPU driver…", v -> show(drivers)));
+        main.addView(row("All settings…", v -> { close(true); game.openSettings(); }));
+        main.addView(divider());
+        main.addView(row("Restart game", v -> { close(true); game.confirmRestart(); }));
+        Button quit = row("Quit ExaltDS", v -> { close(true); game.confirmQuit(); });
+        quit.setTextColor(Exalt.DANGER);
+        main.addView(quit);
+    }
+
+    private boolean hasPack() {
+        try { return GameSettings.hasTextures(GameImport.active(game, id), id); } catch (Exception e) { return false; }
+    }
+
+    private void save() {
+        try { s.save(game); } catch (Exception e) { toast("Could not save: " + e.getMessage()); }
+        refreshApply();
+    }
+
+    private void refreshApply() {
+        if (apply == null) return;
+        boolean pending = modsChanged || !snapshot(s).equals(started);
+        apply.setVisibility(pending ? View.VISIBLE : View.GONE);
+    }
+
+    /** Saves are written already; mods are linked into place, then the game starts again with the saved settings. */
+    private void restart() {
+        if (busy) return;
+        busy = true;
+        toast("Restarting…");
+        boolean linkMods = modsChanged;
+        new Thread(() -> {
+            String error = null;
+            try { if (linkMods) Exalt.apply(game, id); } catch (Exception e) { error = e.getMessage(); }
+            String failed = error;
+            game.runOnUiThread(() -> {
+                busy = false;
+                if (failed != null) { toast("Mods could not be applied: " + failed); return; }
+                close(true);
+                game.relaunch();
+            });
+        }, "exalt-apply").start();
+    }
+
+    // ---- mods and textures ----
+
+    private void buildMods() {
+        mods.addView(backRow("Mods / textures"));
+        modsStatus = text("", 14, Exalt.MUTED);
+        modsStatus.setPadding(px(20), px(10), px(20), px(8));
+        mods.addView(modsStatus);
+        modsList = column();
+        mods.addView(modsList);
+        mods.addView(row("Import mod or texture pack…", v -> pick(PICK_MOD)));
+        mods.addView(row("Remove a mod…", v -> removeMod()));
+        TextView note = text("Choose a folder. A mod holds a romfs folder (like the feet mod); a texture pack holds PNG pictures and replaces the current pack. Changes apply after Apply and restart.", 12, Exalt.MUTED);
+        note.setPadding(px(20), px(8), px(20), px(12));
+        mods.addView(note);
+    }
+
+    private void refreshMods() {
+        modsList.removeAllViews();
+        List<Exalt.Layer> layers = Exalt.list(game, id);
+        for (Exalt.Layer l : layers)
+            modsList.addView(check(l.name, l.on, on -> { Exalt.setOn(game, id, l.name, on); modsChanged = true; refreshApply(); }));
+        modsStatus.setText((layers.isEmpty() ? "No mods imported." : layers.size() + (layers.size() == 1 ? " mod." : " mods."))
+                + "\nHD texture pack: " + (hasPack() ? (s.textures ? "installed, on" : "installed, off") : "none"));
+    }
+
+    private void removeMod() {
+        List<Exalt.Layer> layers = Exalt.list(game, id);
+        if (layers.isEmpty()) { toast("No mods to remove."); return; }
+        String[] names = new String[layers.size()];
+        for (int i = 0; i < names.length; i++) names[i] = layers.get(i).name;
+        AlertDialog d = new AlertDialog.Builder(game, game.palette().dialogTheme()).setTitle("Remove a mod")
+                .setItems(names, (x, i) -> { Exalt.delete(game, id, names[i]); modsChanged = true; refreshMods(); refreshApply(); toast("Removed " + names[i] + "."); })
+                .setNegativeButton("Cancel", null).create();
+        d.show(); game.palette().dialog(d, false);
+    }
+
+    // ---- GPU driver ----
+
+    private Button driverRow;
+
+    private void buildDrivers() {
+        drivers.addView(backRow("GPU driver"));
+        driverRow = row("", v -> chooseDriver());
+        drivers.addView(driverRow);
+        drivers.addView(row("Import driver ZIP…", v -> pick(PICK_DRIVER)));
+        driverStatus = text("A driver ZIP holds meta.json and the driver's .so (Turnip, for example). Only import drivers you trust: they run inside the app. The change applies after Apply and restart.", 12, Exalt.MUTED);
+        driverStatus.setPadding(px(20), px(8), px(20), px(12));
+        drivers.addView(driverStatus);
+    }
+
+    private List<String[]> installedDrivers() {
+        List<String[]> out = new ArrayList<>();
+        File[] folders = new File(game.getFilesDir(), "drivers").listFiles(f -> f.isDirectory() && f.getName().matches("[0-9a-fA-F-]{36}"));
+        if (folders != null) for (File f : folders) try {
+            String library = GameSettings.driverLibrary(f);
+            org.json.JSONObject meta = new org.json.JSONObject(new String(java.nio.file.Files.readAllBytes(new File(f, "meta.json").toPath()), java.nio.charset.StandardCharsets.UTF_8));
+            out.add(new String[]{f.getName(), meta.optString("name", library) + " " + meta.optString("driverVersion", "")});
+        } catch (Exception ignored) { }
+        return out;
+    }
+
+    private void refreshDrivers() {
+        String name = "System driver";
+        if (s.flag("custom_driver")) for (String[] d : installedDrivers()) if (d[0].equals(s.driver)) name = d[1].trim();
+        driverRow.setText("Driver: " + name + "  ▾");
+    }
+
+    private void chooseDriver() {
+        List<String[]> list = installedDrivers();
+        String[] names = new String[list.size() + 1];
+        names[0] = "System driver";
+        int at = 0;
+        for (int i = 0; i < list.size(); i++) { names[i + 1] = list.get(i)[1].trim(); if (s.flag("custom_driver") && list.get(i)[0].equals(s.driver)) at = i + 1; }
+        choose(driverRow, names, at, i -> {
+            s.values.put("custom_driver", i > 0);
+            if (i > 0) s.driver = list.get(i - 1)[0];
+            save(); refreshDrivers();
+        });
+    }
+
+    // ---- file pickers (Game forwards the results) ----
+
+    private void pick(int request) {
+        Intent intent = request == PICK_MOD
+                ? new Intent(Intent.ACTION_OPEN_DOCUMENT_TREE).addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION | Intent.FLAG_GRANT_PREFIX_URI_PERMISSION)
+                : new Intent(Intent.ACTION_OPEN_DOCUMENT).setType("application/zip").addCategory(Intent.CATEGORY_OPENABLE).addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION);
+        try { game.startActivityForResult(intent, request); }
+        catch (android.content.ActivityNotFoundException e) { toast("No file picker is available."); }
+    }
+
+    /** True when the result was one of the sidebar's pickers. */
+    boolean result(int request, int code, Intent data) {
+        if (request != PICK_MOD && request != PICK_DRIVER) return false;
+        if (code != android.app.Activity.RESULT_OK || data == null || data.getData() == null || busy) return true;
+        Uri uri = data.getData();
+        busy = true;
+        toast(request == PICK_MOD ? "Importing…" : "Importing driver…");
+        if (modsStatus != null && request == PICK_MOD) modsStatus.setText("Importing…");
+        new Thread(() -> {
+            String message;
+            try {
+                if (request == PICK_MOD) message = Exalt.importFolder(game, id, uri, (bytes, files, name) ->
+                        game.runOnUiThread(() -> { if (modsStatus != null) modsStatus.setText(String.format(Locale.ROOT, "Importing… %.1f MB, %d files", bytes / 1048576.0, files)); }));
+                else { Launcher.installDriver(game, id, uri); message = "Driver imported and selected."; }
+            } catch (Exception e) { message = "Import failed: " + e.getMessage(); }
+            String done = message;
+            game.runOnUiThread(() -> {
+                busy = false;
+                s = GameSettings.load(game, id); // the driver import saved its choice itself
+                if (request == PICK_MOD && !done.startsWith("Import failed")) { modsChanged = true; if (done.startsWith("Texture")) { s.textures = true; save(); } }
+                toast(done);
+                if (open) { if (request == PICK_MOD) refreshMods(); else refreshDrivers(); refreshApply(); }
+            });
+        }, "exalt-import").start();
+        return true;
+    }
+
+    // ---- widgets (after Somniel's skin, in ExaltDS colours) ----
+
+    private interface Toggle { void on(boolean v); }
+    private interface Choice { void pick(int i); }
+
+    private void choose(View anchor, String[] names, int selected, Choice c) {
+        PopupMenu m = new PopupMenu(game, anchor);
+        for (int i = 0; i < names.length; i++) m.getMenu().add(0, i, i, (i == selected ? "● " : "    ") + names[i]);
+        m.setOnMenuItemClickListener(it -> { c.pick(it.getItemId()); return true; });
+        m.show();
+    }
+
+    private void toast(String t) { Toast.makeText(game, t, Toast.LENGTH_LONG).show(); }
+
+    private LinearLayout column() { LinearLayout l = new LinearLayout(game); l.setOrientation(LinearLayout.VERTICAL); return l; }
+
+    private TextView text(String s, int sp, int color) {
+        TextView t = new TextView(game); t.setText(s); t.setTextSize(sp); t.setTextColor(color); return t;
+    }
+
+    private TextView label(String s) {
+        TextView t = text(s, 13, Exalt.MUTED);
+        t.setLetterSpacing(0.02f);
+        t.setPadding(px(20), px(8), px(20), 0);
+        return t;
+    }
+
+    private View divider() {
+        View v = new View(game);
+        v.setBackgroundColor(0x1FFFFFFF);
+        LinearLayout.LayoutParams lp = new LinearLayout.LayoutParams(-1, Math.max(1, px(1)));
+        lp.setMargins(px(20), px(6), px(20), px(6));
+        v.setLayoutParams(lp);
+        return v;
+    }
+
+    private LinearLayout.LayoutParams rowParams() {
+        LinearLayout.LayoutParams lp = new LinearLayout.LayoutParams(-1, px(42));
+        lp.setMargins(px(8), px(1), px(8), px(1));
+        return lp;
+    }
+
+    private StateListDrawable focusBg() {
+        StateListDrawable d = new StateListDrawable();
+        GradientDrawable hi = new GradientDrawable();
+        hi.setColor(Exalt.FOCUS); hi.setCornerRadius(px(10)); hi.setStroke(Math.max(1, px(1)), Exalt.GOLD_SOFT);
+        GradientDrawable press = new GradientDrawable();
+        press.setColor(Exalt.PRESS); press.setCornerRadius(px(10));
+        d.addState(new int[]{android.R.attr.state_pressed}, press);
+        d.addState(new int[]{android.R.attr.state_focused}, hi);
+        d.addState(new int[]{}, new ColorDrawable(Color.TRANSPARENT));
+        return d;
+    }
+
+    private Button row(String label, View.OnClickListener l) {
+        Button b = new Button(game);
+        b.setText(label); b.setAllCaps(false); b.setTextSize(16);
+        b.setTypeface(Typeface.create("sans-serif-medium", Typeface.NORMAL));
+        b.setTextColor(Exalt.INK);
+        b.setGravity(Gravity.CENTER_VERTICAL | Gravity.START);
+        b.setPadding(px(14), 0, px(14), 0);
+        b.setStateListAnimator(null);
+        b.setBackground(focusBg());
+        b.setOnClickListener(l);
+        b.setLayoutParams(rowParams());
+        return b;
+    }
+
+    private Button backRow(String title) {
+        Button b = row("‹  " + title, v -> show(main));
+        b.setTypeface(Typeface.DEFAULT_BOLD);
+        return b;
+    }
+
+    private CheckBox check(String label, boolean on, Toggle t) {
+        CheckBox c = new CheckBox(game);
+        c.setText(label); c.setTextSize(16); c.setTextColor(Exalt.INK);
+        c.setButtonTintList(android.content.res.ColorStateList.valueOf(Exalt.GOLD));
+        c.setChecked(on);
+        c.setPadding(px(8), 0, px(14), 0);
+        c.setBackground(focusBg());
+        c.setOnCheckedChangeListener((b, v) -> t.on(v));
+        c.setLayoutParams(rowParams());
+        return c;
+    }
+
+    private SeekBar seek(int max, int value) {
+        SeekBar s = new SeekBar(game);
+        float r = px(3);
+        GradientDrawable track = new GradientDrawable(); track.setColor(0x40FFFFFF); track.setCornerRadius(r);
+        GradientDrawable fill = new GradientDrawable(); fill.setColor(Exalt.GOLD); fill.setCornerRadius(r);
+        android.graphics.drawable.LayerDrawable bar = new android.graphics.drawable.LayerDrawable(new android.graphics.drawable.Drawable[]{
+                track, new android.graphics.drawable.ClipDrawable(fill, Gravity.START, android.graphics.drawable.ClipDrawable.HORIZONTAL)});
+        bar.setId(0, android.R.id.background); bar.setId(1, android.R.id.progress);
+        bar.setLayerHeight(0, px(6)); bar.setLayerHeight(1, px(6));
+        bar.setLayerGravity(0, Gravity.CENTER_VERTICAL); bar.setLayerGravity(1, Gravity.CENTER_VERTICAL);
+        s.setProgressDrawable(bar);
+        GradientDrawable knob = new GradientDrawable(); knob.setShape(GradientDrawable.OVAL); knob.setColor(Color.WHITE); knob.setSize(px(18), px(18));
+        s.setThumb(knob);
+        s.setMax(max); s.setKeyProgressIncrement(1); s.setProgress(value);
+        s.setPadding(px(28), px(8), px(28), px(8));
+        s.setBackground(focusBg());
+        return s;
+    }
+}

@@ -12,6 +12,11 @@ impl log::Log for AndroidLog {
         // cranelift_jit logs each shader's whole IR at info; logcat writes stall frames.
         metadata.level() <= log::Level::Warn
             || (metadata.level() <= log::Level::Info && metadata.target().starts_with("zakuro"))
+            || debug_targets().iter().any(|prefix| match prefix.strip_suffix('$') {
+                // "zakuro_gpu$" matches that target exactly, not its submodules
+                Some(exact) => metadata.target() == exact,
+                None => metadata.target().starts_with(prefix.as_str()),
+            })
     }
     fn log(&self, record: &log::Record<'_>) {
         if !self.enabled(record.metadata()) {
@@ -39,9 +44,45 @@ impl log::Log for AndroidLog {
     }
     fn flush(&self) {}
 }
+/// Development switch: `adb shell setprop debug.zakuro.log zakuro_gpu::pipelines,zakuro_gpu$`
+/// logs those target prefixes (a trailing `$` means that exact target) down to debug level.
+/// Unset, logging stays at info.
+fn debug_targets() -> &'static [String] {
+    static TARGETS: std::sync::OnceLock<Vec<String>> = std::sync::OnceLock::new();
+    TARGETS.get_or_init(|| {
+        let text = system_property(c"debug.zakuro.log").unwrap_or_default();
+        text.split(',').map(str::trim).filter(|prefix| !prefix.is_empty()).map(str::to_owned).collect()
+    })
+}
+
+/// An Android system property's value, none when it is unset or empty.
+pub fn system_property(name: &std::ffi::CStr) -> Option<String> {
+    extern "C" {
+        fn __system_property_get(name: *const std::ffi::c_char, value: *mut std::ffi::c_char) -> i32;
+    }
+    let mut value = [0 as std::ffi::c_char; 92]; // PROP_VALUE_MAX
+    // SAFETY: the buffer is PROP_VALUE_MAX bytes, as the bionic call requires.
+    let length = unsafe { __system_property_get(name.as_ptr(), value.as_mut_ptr()) };
+    if length <= 0 {
+        return None;
+    }
+    // SAFETY: bionic NUL-terminates the value within the buffer.
+    Some(unsafe { std::ffi::CStr::from_ptr(value.as_ptr()) }.to_string_lossy().trim().to_owned()).filter(|text| !text.is_empty())
+}
+
 pub fn init_log() {
     let _ = log::set_logger(&LOG);
-    log::set_max_level(log::LevelFilter::Info);
+    let debugging = !debug_targets().is_empty();
+    log::set_max_level(if debugging { log::LevelFilter::Debug } else { log::LevelFilter::Info });
+    if debugging {
+        log::info!("debug logging for {:?} (debug.zakuro.log)", debug_targets());
+    }
+    // development switch: adb shell setprop debug.zakuro.gpu_times 1 logs the GPU's time per
+    // kind of work (zakuro_gpu::times), which the renderer reads from ZAKURO_GPU_TIMES
+    if system_property(c"debug.zakuro.gpu_times").as_deref() == Some("1") {
+        std::env::set_var("ZAKURO_GPU_TIMES", "1");
+        log::info!("GPU timing on (debug.zakuro.gpu_times)");
+    }
     std::panic::set_hook(Box::new(|info| log::error!("{info}")));
 }
 
@@ -144,7 +185,7 @@ pub fn launch(app: &AndroidApp) -> Result<Launch, String> {
                 &[JValue::Object(&key), JValue::Int(1)],
             )?
             .i()?
-            .clamp(1, 3) as u32;
+            .clamp(1, 4) as u32;
         let key = env.new_string("advanced")?;
         let value = env
             .call_method(

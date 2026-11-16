@@ -5,7 +5,9 @@ param(
     [string]$CMake = '',
     [string]$OutputDirectory = '',
     [string]$BuildTools = '36.0.0',
-    [string]$Platform = 'android-37.0'
+    [string]$Platform = 'android-37.0',
+    # zakuroishi (the library app) or exalt (ExaltDS: its own package, android/exalt manifest and resources)
+    [ValidateSet('zakuroishi','exalt')][string]$Flavor = 'zakuroishi'
 )
 $ErrorActionPreference = 'Stop'
 $PSNativeCommandUseErrorActionPreference = $false
@@ -30,9 +32,15 @@ $run = (Get-Date -Format 'yyyyMMdd-HHmmss') + '-' + [guid]::NewGuid().ToString('
 $work = Join-Path $out "work-$run"
 New-Item -ItemType Directory -Force "$work/classes", "$work/dex", "$work/lib/arm64-v8a" | Out-Null
 $log = Join-Path $out "build-$run.log"
-$apk = Join-Path $out "zakuro-android-test-$run.apk"
+$apk = Join-Path $out ($(if ($Flavor -eq 'exalt') { 'exaltds' } else { 'zakuro-android-test' }) + "-$run.apk")
+$package = if ($Flavor -eq 'exalt') { 'io.github.exaltds' } else { 'io.github.zakuro.android' }
+$launcherActivity = if ($Flavor -eq 'exalt') { 'io.github.zakuro.android.ExaltHome' } else { 'io.github.zakuro.android.Launcher' }
+$appDir = if ($Flavor -eq 'exalt') { 'android/exalt' } else { 'android/app/src/main' }
 function Invoke-Tool([string]$Exe, [string[]]$Arguments) {
-    & $Exe @Arguments 2>&1 | Tee-Object -FilePath $log -Append | Out-Host
+    # Windows PowerShell 5.1 turns native stderr into terminating errors under Stop;
+    # the exit code below is the real failure signal.
+    $ErrorActionPreference = 'Continue'
+    & $Exe @Arguments 2>&1 | ForEach-Object { "$_" } | Tee-Object -FilePath $log -Append | Out-Host
     if ($LASTEXITCODE -ne 0) {
         $failure = [Exception]::new("$Exe failed with exit $LASTEXITCODE; log: $log")
         $failure.Data['ExitCode'] = $LASTEXITCODE
@@ -92,10 +100,10 @@ try {
         '-p','zakuro-android','--lib','--features','zakuro-gpu/vulkan')
     Invoke-Tool "$ndkBin/llvm-strip.exe" @('-o',"$work/lib/arm64-v8a/libzakuro_android.so",
         "$env:CARGO_TARGET_DIR/aarch64-linux-android/release/libzakuro_android.so")
-    $manifest = Join-Path $repo 'android/app/src/main/AndroidManifest.xml'
+    $manifest = Join-Path $repo "$appDir/AndroidManifest.xml"
     $sources = @(Get-ChildItem "$repo/android/app/src/main/java" -Filter '*.java' -Recurse | Sort-Object FullName | ForEach-Object FullName)
     if (!$sources.Count) { throw 'No Java sources' }
-    Invoke-Tool "$tools/aapt2.exe" @('compile','--dir',"$repo/android/app/src/main/res",'-o',"$work/resources.zip")
+    Invoke-Tool "$tools/aapt2.exe" @('compile','--dir',"$repo/$appDir/res",'-o',"$work/resources.zip")
     Invoke-Tool "$tools/aapt2.exe" @('link','-o',"$work/unsigned.apk",'--manifest',$manifest,'-I',$androidJar,"$work/resources.zip")
     Invoke-Tool "$JavaHome/bin/javac.exe" (@('-nowarn','--release','11','-classpath',$androidJar,'-d',"$work/classes") + $sources)
     $classes = @(Get-ChildItem "$work/classes" -Filter '*.class' -Recurse | ForEach-Object FullName)
@@ -150,8 +158,8 @@ try {
     $badging = & "$tools/aapt.exe" dump badging $apk
     if ($LASTEXITCODE -ne 0) { throw 'Cannot inspect APK' }
     $badging | Add-Content $log
-    if (!($badging -match "package: name='io.github.zakuro.android'") -or
-        !($badging -match "launchable-activity: name='io.github.zakuro.android.Launcher'")) { throw 'APK identity mismatch' }
+    if (!($badging -match "package: name='$package'") -or
+        !($badging -match "launchable-activity: name='$launcherActivity'")) { throw 'APK identity mismatch' }
     Add-Type -AssemblyName System.IO.Compression.FileSystem
     $archive = [IO.Compression.ZipFile]::OpenRead($apk)
     try {

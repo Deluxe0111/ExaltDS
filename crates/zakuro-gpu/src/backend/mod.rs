@@ -114,6 +114,18 @@ pub struct GpuScreen {
     pub(crate) bounds: [f32; 4],
 }
 
+impl GpuScreen {
+    /// which picture this is: the same image, rect and batch mean the same pixels, so a present
+    /// showing nothing else new only repeats the last one.
+    pub fn picture_key(&self) -> (u64, [u32; 4], u64) {
+        #[cfg(feature = "vulkan")]
+        let image = ash::vk::Handle::as_raw(self.view);
+        #[cfg(not(feature = "vulkan"))]
+        let image = 0;
+        (image, self.rect, self.batch)
+    }
+}
+
 /// what is drawn over the screens, a user interface, as textured triangles
 /// in window pixels.
 #[derive(Default)]

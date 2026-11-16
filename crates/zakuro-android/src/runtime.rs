@@ -3,7 +3,7 @@ use crate::{
     bridge::{self, Command},
     geometry,
     input::Input,
-    pacing::{emulation_rates, held_at_60, next_deadline, outruns_60, PACE_WINDOW},
+    pacing::{emulation_rates, held_at_60, next_deadline, outruns_60, Repeats, PACE_WINDOW},
     presentation::cpu_pixels,
     platform,
     sensors::Sensors,
@@ -57,6 +57,9 @@ struct Surface {
     settings: Advanced,
     cursor_texture: bool,
     cpu_images: [Option<zakuro_core::Screen>; 3],
+    /// the renderer's pictures the last present showed (top, bottom, right eye), when all of
+    /// its screens came straight from the GPU: a present with the same ones only repeats it.
+    last_pictures: Option<[Option<(u64, [u32; 4], u64)>; 3]>,
 }
 impl Surface {
     fn new(window: NativeWindow, settings: &Advanced, entry: ash::Entry) -> Result<Self, String> {
@@ -77,6 +80,32 @@ impl Surface {
             settings: settings.clone(),
             cursor_texture: false,
             cpu_images: [None, None, None],
+            last_pictures: None,
+        };
+        surface.configure(settings);
+        Ok(surface)
+    }
+    /// A second-display surface on the device the main one shares with the renderer,
+    /// so it shows the renderer's images straight from the GPU instead of reading
+    /// each frame back to the host (plan R05).
+    fn with_shared(
+        window: NativeWindow,
+        settings: &Advanced,
+        shared: std::sync::Arc<zakuro_gpu::SharedDevice>,
+    ) -> Result<Self, String> {
+        let window = Window(window);
+        request_frame_rate(&window, 60.0);
+        let size = (window.0.width().max(1) as u32, window.0.height().max(1) as u32);
+        let presenter = VulkanPresenter::with_shared(&window, size, shared).map_err(|e| e.to_string())?;
+        let mut surface = Self {
+            presenter,
+            window,
+            rate: 60.0,
+            shared: true,
+            settings: settings.clone(),
+            cursor_texture: false,
+            cpu_images: [None, None, None],
+            last_pictures: None,
         };
         surface.configure(settings);
         Ok(surface)
@@ -122,11 +151,14 @@ impl Surface {
             y,
         )
     }
+    /// presents the screens, or leaves out (Ok(false)) a present that would show exactly the
+    /// pictures the last one did, as `repeats` says.
     fn present(
         &mut self,
         system: &mut System,
         cursor: Option<[f32; 2]>,
-    ) -> Result<(), PresentError> {
+        repeats: Repeats,
+    ) -> Result<bool, PresentError> {
         let shown = geometry::places(
             &self.settings,
             self.window.0.width().max(1) as u32,
@@ -159,6 +191,20 @@ impl Surface {
             .as_ref()
             .map(|(image, gpu)| (image, *gpu))
             .unwrap_or((&empty, None));
+        let all_gpu = [(top.1, top_gpu), (bottom.1, bottom_gpu), (right.1, right_gpu)]
+            .iter()
+            .all(|(width, gpu)| gpu.is_some() || *width == 0)
+            && (top_gpu.is_some() || bottom_gpu.is_some());
+        let key = [top_gpu, bottom_gpu, right_gpu].map(|gpu| gpu.map(|g| g.picture_key()));
+        let skip = match repeats {
+            Repeats::Show => false,
+            Repeats::SkipWhileBehind => self.presenter.behind(),
+            Repeats::Skip => true,
+        };
+        if skip && cursor.is_none() && all_gpu && self.last_pictures == Some(key) {
+            REPEATS_SKIPPED.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+            return Ok(false);
+        }
         let top_pixels = cpu_pixels(&mut self.cpu_images[0], &top, top_gpu.is_some());
         let bottom_pixels = cpu_pixels(&mut self.cpu_images[1], &bottom, bottom_gpu.is_some());
         let right_pixels = cpu_pixels(&mut self.cpu_images[2], right, right_gpu.is_some());
@@ -190,7 +236,8 @@ impl Surface {
         if result.is_err() {
             self.cpu_images = [None, None, None];
         }
-        result
+        self.last_pictures = (result.is_ok() && all_gpu).then_some(key);
+        result.map(|()| true)
     }
     fn cursor(&mut self, cursor: [f32; 2], overlay: &mut Overlay) {
         let width = self.window.0.width().max(1) as u32;
@@ -279,6 +326,8 @@ fn picture(
     CPU_SCREENS[screen as usize].fetch_add(1, std::sync::atomic::Ordering::Relaxed);
     (system.read_screen_scaled(screen), None)
 }
+/// presents left out because they would only repeat the last picture.
+static REPEATS_SKIPPED: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(0);
 static CPU_SCREENS: [std::sync::atomic::AtomicU32; 2] = [std::sync::atomic::AtomicU32::new(0), std::sync::atomic::AtomicU32::new(0)];
 
 impl Input {
@@ -456,6 +505,10 @@ pub fn run(app: &AndroidApp) -> Result<(), String> {
     }
     let mut surface: Option<Surface> = None;
     let mut second: Option<Surface> = None;
+    // whether this second-display window already tried joining the renderer's device
+    let mut second_join_tried = false;
+    // development A/B switch: adb shell setprop debug.zakuro.second_readback 1
+    let force_second_readback = platform::system_property(c"debug.zakuro.second_readback").as_deref() == Some("1");
     // The main presenter while Android has taken its window away (app switch).
     let mut parked: Option<Surface> = None;
     let mut system: Option<System> = None;
@@ -473,6 +526,9 @@ pub fn run(app: &AndroidApp) -> Result<(), String> {
     let mut display_paced = effective_speed == 100 && settings.frame_cap == 60;
     let present_interval = settings.presentation_interval();
     let mut next_present = Instant::now();
+    let mut present_switches = 0u32;
+    // the last iteration left out a repeat, so the timer, not FIFO, paces this pair of refreshes
+    let mut after_skip = false;
     let mut stats_start = Instant::now();
     let mut stats_frames = 0u32;
     let mut stats_cycles = 0u64;
@@ -496,6 +552,8 @@ pub fn run(app: &AndroidApp) -> Result<(), String> {
     };
     let (mut hitch_compiles, mut hud_compiles) = (compiles(), compiles());
     let mut hud_game = zakuro_core::GAME_FRAMES.load(std::sync::atomic::Ordering::Relaxed);
+    // the performance overlay's frame times: the time between the game's own pictures
+    let (mut overlay_game, mut overlay_at) = (hud_game, Instant::now());
     let mut hud_distinct = pictures_shown();
     let mut told_frame_generation_failed = false;
     let mut frame_generation = app.internal_data_path().map(|files| framegen::FrameGenOptions {
@@ -605,7 +663,7 @@ pub fn run(app: &AndroidApp) -> Result<(), String> {
                 MainEvent::InputAvailable => input.read(app, surface.as_ref(), &settings),
                 MainEvent::RedrawNeeded { .. } => {
                     if let (Some(s), Some(system)) = (&mut surface, &mut system) {
-                        if let Err(e) = s.present(system, (settings.right_stick == RightStick::Cursor).then_some(input.cursor)) {
+                        if let Err(e) = s.present(system, (settings.right_stick == RightStick::Cursor).then_some(input.cursor), Repeats::Show) {
                             if !matches!(e, PresentError::OutOfDate) {
                                 failure = Some(e.to_string());
                             }
@@ -640,6 +698,7 @@ pub fn run(app: &AndroidApp) -> Result<(), String> {
                 Command::Resume => {
                     paused = false;
                     next_frame = Instant::now();
+                    overlay_at = next_frame; // the pause is not a frame
                 }
                 Command::Exit => destroy = true,
                 Command::Restart => {
@@ -737,13 +796,28 @@ pub fn run(app: &AndroidApp) -> Result<(), String> {
         }
         if let Some(window) = bridge::second_surface() {
             second = None;
+            second_join_tried = false;
             if settings.dual_display {
                 if let Some(window) = window {
-                    match Surface::new(
-                        window,
-                        &geometry::display(&settings, true, true),
-                        driver.entry.clone(),
-                    ) {
+                    let external_settings = geometry::display(&settings, true, true);
+                    let device = surface
+                        .as_ref()
+                        .filter(|_| !settings.gpu_readback && !force_second_readback)
+                        .and_then(|main| main.presenter.shared_device());
+                    let made = match device {
+                        Some(device) => match Surface::with_shared(window.clone(), &external_settings, device) {
+                            Ok(external) => {
+                                log::info!("second display shows the renderer's images straight from the GPU");
+                                Ok(external)
+                            }
+                            Err(error) => {
+                                log::warn!("second display falls back to GPU readback, {error}");
+                                Surface::new(window, &external_settings, driver.entry.clone())
+                            }
+                        },
+                        None => Surface::new(window, &external_settings, driver.entry.clone()),
+                    };
+                    match made {
                         Ok(external) => second = Some(external),
                         Err(error) => {
                             platform::message(app, &format!("Second display unavailable: {error}"));
@@ -758,6 +832,39 @@ pub fn run(app: &AndroidApp) -> Result<(), String> {
             input.state.touch = None;
             input.finger = None;
             bridge::clear_input();
+        }
+        // The second display's window can arrive before the main surface (and its shared
+        // device) exists; join the renderer's device once it does (plan R05).
+        if !second_join_tried && !settings.gpu_readback && !force_second_readback {
+            let shared = surface.as_ref().and_then(|main| main.presenter.shared_device());
+            if let (Some(device), Some(external)) = (shared, second.as_ref()) {
+                second_join_tried = true;
+                if !external.shared {
+                    let window = external.window.0.clone();
+                    let external_settings = external.settings.clone();
+                    // the old presenter (and its own device) goes first
+                    second = None;
+                    match Surface::with_shared(window.clone(), &external_settings, device) {
+                        Ok(joined) => {
+                            log::info!("second display joined the renderer's device: shown straight from the GPU");
+                            second = Some(joined);
+                        }
+                        Err(error) => {
+                            log::warn!("second display stays on GPU readback, {error}");
+                            match Surface::new(window, &external_settings, driver.entry.clone()) {
+                                Ok(again) => second = Some(again),
+                                Err(error) => {
+                                    platform::message(app, &format!("Second display unavailable: {error}"));
+                                    platform::close_second_display(app);
+                                    if let Some(main) = &mut surface {
+                                        main.configure(&geometry::display(&settings, false, false));
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+            }
         }
         if let Some(sensors) = &mut sensors {
             sensors.set_active(
@@ -930,6 +1037,19 @@ pub fn run(app: &AndroidApp) -> Result<(), String> {
         // Emulation work only: under FIFO the present below includes the vsync wait,
         // which would read as a full 16.7 ms frame and over-boost the clocks.
         platform::report_frame(app, work.as_nanos() as i64);
+        {
+            let drawn = zakuro_core::GAME_FRAMES.load(std::sync::atomic::Ordering::Relaxed);
+            let new = drawn.wrapping_sub(overlay_game);
+            if new > 0 {
+                let now = Instant::now();
+                // several pictures in one loop (fast-forward) share the time evenly; a paused stretch is one long frame
+                let each = now.duration_since(overlay_at) / new.min(8) as u32;
+                for _ in 0..new.min(8) {
+                    bridge::record_frame(each);
+                }
+                (overlay_game, overlay_at) = (drawn, now);
+            }
+        }
         worst_core = worst_core.max(core_start.elapsed());
         let sound = system.take_audio();
         if audio.as_ref().is_some_and(Audio::disconnected) {
@@ -963,13 +1083,18 @@ pub fn run(app: &AndroidApp) -> Result<(), String> {
         s.set_rate(generation.map_or(60.0, |options| options.per_tick() as f32 * 60.0));
         s.presenter.set_vsync((settings.vsync_pacing || generating) && display_paced);
         s.presenter.set_short_queue(settings.short_vsync_queue);
+        s.presenter.set_extra_images(u32::from(present_switches & 2 != 0));
         let vsync = s.presenter.waits_for_display() && display_paced;
+        let repeats = Repeats::chosen(present_switches, generating);
+        let mut skipped_repeat = false;
         if vsync || present_start >= next_present {
             match s.present(
                 system,
                 (settings.right_stick == RightStick::Cursor).then_some(input.cursor),
+                repeats,
             ) {
-                Ok(()) => {
+                Ok(false) => skipped_repeat = true,
+                Ok(true) => {
                     let extra = framegen::EXTRA_PRESENTS.swap(0, std::sync::atomic::Ordering::Relaxed) as u32;
                     stats_frames += 1 + extra;
                     benchmark_presented += 1 + extra;
@@ -982,6 +1107,7 @@ pub fn run(app: &AndroidApp) -> Result<(), String> {
                 if let Err(error) = external.present(
                     system,
                     (settings.right_stick == RightStick::Cursor).then_some(input.cursor),
+                    repeats,
                 ) {
                     if !matches!(error, PresentError::OutOfDate) {
                         platform::message(app, &format!("Second display disconnected: {error}"));
@@ -1064,6 +1190,23 @@ pub fn run(app: &AndroidApp) -> Result<(), String> {
             let bench_distinct_fps = distinct_now.wrapping_sub(bench_distinct) as f64 / elapsed;
             let counts = system.interpolation_counts();
             let fg = framegen::take_stats();
+            // development A/B switch, see zakuro_gpu::EXPERIMENT
+            let experiment = platform::system_property(c"debug.zakuro.experiment").and_then(|text| text.parse::<u32>().ok()).unwrap_or(0);
+            if zakuro_gpu::EXPERIMENT.swap(experiment, std::sync::atomic::Ordering::Relaxed) != experiment {
+                log::info!("experiment {experiment} from the next benchmark window (debug.zakuro.experiment)");
+            }
+            // present scheduling switches: 1 always leave out presents that repeat the last
+            // picture, 4 always show them (default: left out while the GPU is behind), 2 one
+            // more swapchain image
+            let switches = platform::system_property(c"debug.zakuro.present").and_then(|text| text.parse::<u32>().ok()).unwrap_or(0);
+            if switches != present_switches {
+                log::info!("present switches {switches} from the next benchmark window (debug.zakuro.present)");
+                present_switches = switches;
+            }
+            let (present_parts, presents) = zakuro_gpu::backend::vulkan::take_present_stats();
+            log::info!("present timing presents={} repeats_skipped={} fence_ms={:.3} acquire_ms={:.3} submit_ms={:.3} queue_present_ms={:.3} switches={}",
+                presents, REPEATS_SKIPPED.swap(0, std::sync::atomic::Ordering::Relaxed),
+                present_parts[0], present_parts[1], present_parts[2], present_parts[3], present_switches);
             log::info!("benchmark frames=300 fps={:.2} speed_percent={:.1} presented_fps={:.2} speed_limit={} core_ms={:.3} present_ms={:.3} worst_core_ms={:.1} worst_frame_ms={:.1} slow={} vsync={} cpu_top={} cpu_bottom={} resolution={} textures={} shared={} gpu_waits={:.2} gpu_wait_ms={:.3} readbacks={:.2} readback_ms={:.3} wb[sync={} fill={} rows={} read={} flush={} pic={} room={}] audio_queue_ms={:.0} audio_underruns={} short_presses={} game_fps={:.2} distinct_fps={:.2} between={} rough={} off_beat={} fg_gpu_ms={:.2} fg_cpu_ms={:.2} fg_passes={}",
                 fps, speed,
                 f64::from(benchmark_presented) / elapsed, effective_speed,
@@ -1099,7 +1242,13 @@ pub fn run(app: &AndroidApp) -> Result<(), String> {
         } else {
             (pace_since, pace_frames, panel_outruns_60) = (Instant::now(), 0, false);
         }
-        let step = if !vsync { emulation_interval } else { Duration::from_secs_f64(1.0 / if panel_outruns_60 { 60.0 } else { 61.0 }) };
+        // A repeat left out has no FIFO wait to pace it: it and the present after it each take one
+        // 60 Hz refresh by the timer. Both, not only the skipped one: a 1/61 s ceiling on the other
+        // makes each pair 0.27 ms short of two refreshes, and the pictures' phase against vsync
+        // then wraps every ~2 s, showing one picture for 1 refresh and the next for 3.
+        let timed = skipped_repeat || after_skip;
+        after_skip = skipped_repeat;
+        let step = if !vsync { emulation_interval } else { Duration::from_secs_f64(1.0 / if panel_outruns_60 || timed { 60.0 } else { 61.0 }) };
         next_frame = next_deadline(next_frame, Instant::now(), step);
     }
     Ok(())

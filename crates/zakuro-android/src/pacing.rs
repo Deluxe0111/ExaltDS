@@ -27,9 +27,45 @@ pub(crate) fn held_at_60(frames: u32, elapsed: Duration) -> bool {
     (29.0..31.0).contains(&fps)
 }
 
+/// what a present that would only repeat the last picture does.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub(crate) enum Repeats {
+    Show,
+    /// left out while the GPU has not finished the last present. A repeat queued behind a
+    /// picture the GPU is still drawing only fills the swapchain: the present call then blocks
+    /// the emulation thread, the GPU idles between frames and its clock drops (B05).
+    SkipWhileBehind,
+    Skip,
+}
+
+impl Repeats {
+    /// from debug.zakuro.present: 1 always leave repeats out, 4 always show them; frame
+    /// generation presents every tick.
+    pub(crate) fn chosen(switches: u32, generating: bool) -> Self {
+        if generating || switches & 4 != 0 {
+            Repeats::Show
+        } else if switches & 1 != 0 {
+            Repeats::Skip
+        } else {
+            Repeats::SkipWhileBehind
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn repeats_are_left_out_only_while_the_gpu_is_behind_by_default() {
+        assert_eq!(Repeats::chosen(0, false), Repeats::SkipWhileBehind);
+        assert_eq!(Repeats::chosen(1, false), Repeats::Skip);
+        assert_eq!(Repeats::chosen(4, false), Repeats::Show);
+        assert_eq!(Repeats::chosen(5, false), Repeats::Show);
+        // frame generation needs a present every tick
+        assert_eq!(Repeats::chosen(0, true), Repeats::Show);
+        assert_eq!(Repeats::chosen(1, true), Repeats::Show);
+    }
 
     #[test]
     fn two_presents_a_frame_on_a_60_hz_panel_count_as_held() {

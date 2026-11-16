@@ -1,6 +1,5 @@
 //! software rasterization of PICA200 draw calls.
 
-use std::collections::HashMap;
 use std::ops::Range;
 use std::sync::{Arc, Condvar, Mutex};
 
@@ -706,7 +705,7 @@ enum Vertices<'a> {
         vertex_shader: &'a ShaderUnit,
         raw: &'a hardware::RawInputs,
         /// each vertex of the draw, counted from the first of the arrays.
-        vertices: &'a [u32],
+        order: hardware::RawOrder<'a>,
     },
     Shaded(&'a [Vertex]),
     /// through the shaders and placed on the screen by another thread, see
@@ -719,7 +718,7 @@ impl Vertices<'_> {
         match self {
             Vertices::Unshaded { inputs, order, .. } => order.map_or(inputs.len(), <[usize]>::len),
             #[cfg(feature = "vulkan")]
-            Vertices::Raw { vertices, .. } => vertices.len(),
+            Vertices::Raw { order, .. } => order.len(),
             Vertices::Shaded(shaded) => shaded.len(),
             Vertices::Prepared(prepared) => prepared.order.as_ref().map_or(prepared.shaded.len(), Vec::len),
         }
@@ -890,7 +889,7 @@ pub(crate) fn hand_out<M: GpuMemory>(
         return None;
     }
     let writes = memory.writes();
-    let scratch = &mut resources.scratch;
+    let scratch = resources.scratch.get_or_insert_with(Box::default);
     read_indices(registers, memory, scratch, indexed);
     let plan = scratch.plans.update(registers, fixed_attributes);
     // the vertices the draw names, from the first to the last
@@ -1107,6 +1106,21 @@ fn place(registers: &[u32], shaded: &[Vertex], order: Option<&[usize]>, viewport
 /// 0's w, which titles cast reflections and shadows onto a surface with.
 fn projected(registers: &[u32]) -> bool {
     (registers[TEXTURE_UNIT_BASES[0] + 2] >> 28) & 7 == 3
+}
+
+/// the window a draw is kept in, its first pixel and the one past its last, cut down to the
+/// scissor's rectangle when the scissor test keeps drawing inside it. one keeping drawing
+/// outside it is left alone, which a rectangle cannot hold, and no title seen uses.
+fn scissored(registers: &[u32], (left, bottom): (i32, i32), (right, top): (i32, i32)) -> ((i32, i32), (i32, i32)) {
+    if registers[REG_SCISSOR_MODE] & 3 != 3 {
+        return ((left, bottom), (right, top));
+    }
+    let corner = |register: u32| ((register & 0x3FF) as i32, ((register >> 16) & 0x3FF) as i32);
+    let (first, last) = (corner(registers[REG_SCISSOR_FIRST]), corner(registers[REG_SCISSOR_LAST]));
+    let (left, bottom) = (left.max(first.0), bottom.max(first.1));
+    // nothing at all when the rectangle misses the window
+    let (right, top) = (right.min(last.0 + 1).max(left), top.min(last.1 + 1).max(bottom));
+    ((left, bottom), (right, top))
 }
 
 /// whether the framebuffer is upside down, the window's rows running from
@@ -1562,7 +1576,9 @@ pub struct Resources {
     pub light_tables: Tables,
     pub proctex_tables: crate::proctex::Tables,
     pub fog_table: crate::fog::Table,
-    scratch: Scratch,
+    /// boxed, a draw takes it for itself and puts it back, which moved a
+    /// thousand bytes each way.
+    scratch: Option<Box<Scratch>>,
     /// the bytes of the last memory fill, the next one's buffer.
     pub(crate) fill: Vec<u8>,
     /// the words of the last command list, the next one's buffer.
@@ -1646,8 +1662,6 @@ struct Scratch {
     unique: Vec<u32>,
     order: Vec<usize>,
     inputs: Vec<[Vec4; shader::INPUT_REGISTERS]>,
-    /// each vertex of a draw counted from the first one it uses.
-    relative: Vec<u32>,
     plans: Plans,
     /// the arrays a draw hands the GPU to decode.
     #[cfg(feature = "vulkan")]
@@ -1688,15 +1702,20 @@ impl Scratch {
 /// of them when filtering, costs far more than looking one up.
 #[derive(Default)]
 pub struct TextureCache {
-    /// by address, format and size.
-    entries: HashMap<TextureKey, Decoded>,
+    /// by address, format and size, hashed by a multiply rather than
+    /// SipHash, as each draw looks its textures up.
+    entries: zakuro_common::hash::IntMap<TextureKey, Decoded>,
     texels: usize,
     /// counts command lists. nothing but drawing changes memory while one
     /// runs, so a texture checked during it is not checked again unless a
     /// draw writes over it.
     list: u64,
-    /// where the draws of this list wrote, as address and length.
-    written: Vec<(u32, u32)>,
+    /// where the draws of this list wrote, as address and length, each with
+    /// how many writes the list had made when it was last written, and how
+    /// many it made. titles draw into a few buffers in turn, which stay a
+    /// few entries rather than one a draw to look through.
+    written: Vec<(u32, u32, usize)>,
+    writes: usize,
     /// the texture pack whose pictures replace textures, and where a
     /// texture is laid out to hash it as Citra did.
     pack: Option<Arc<crate::pack::Pack>>,
@@ -1756,12 +1775,15 @@ impl TextureCache {
     pub fn begin_list(&mut self) {
         self.list += 1;
         self.written.clear();
+        self.writes = 0;
     }
 
     /// a draw writes to size bytes at addr.
     fn wrote(&mut self, addr: u32, size: u32) {
-        if self.written.last() != Some(&(addr, size)) {
-            self.written.push((addr, size));
+        self.writes += 1;
+        match self.written.iter_mut().find(|(start, length, _)| (*start, *length) == (addr, size)) {
+            Some(entry) => entry.2 = self.writes,
+            None => self.written.push((addr, size, self.writes)),
         }
     }
 
@@ -1771,9 +1793,10 @@ impl TextureCache {
         let decoded = self.entries.get(&key)?;
         let (list, writes) = decoded.checked;
         let addr = key.0;
-        let overwritten = self.written[writes.min(self.written.len())..]
+        let overwritten = self
+            .written
             .iter()
-            .any(|&(start, length)| start < addr.saturating_add(size) && addr < start.saturating_add(length));
+            .any(|&(start, length, at)| at > writes && start < addr.saturating_add(size) && addr < start.saturating_add(length));
         (list == self.list && !overwritten).then(|| (decoded.texels.clone(), found(&decoded.replacement)))
     }
 
@@ -1785,7 +1808,7 @@ impl TextureCache {
         if !memory.unchanged(key.0, size, watch) {
             return None;
         }
-        decoded.checked = (self.list, self.written.len());
+        decoded.checked = (self.list, self.writes);
         Some((decoded.texels.clone(), found(&decoded.replacement)))
     }
 
@@ -1800,7 +1823,7 @@ impl TextureCache {
         let _timed = crate::timed(1);
         let (_, format, width, height, levels) = key;
         let hash = fingerprint(data);
-        let checked = (self.list, self.written.len());
+        let checked = (self.list, self.writes);
         let threaded = *self.threaded_lookup.get_or_insert_with(|| crate::backend::renderer_options().is_none_or(|options| options.async_pack_lookup));
         if let Some(decoded) = self.entries.get_mut(&key) {
             if decoded.hash != hash && decoded.bytes.len() == data.len() && width % 8 == 0 && height % 8 == 0 {
@@ -2543,7 +2566,7 @@ struct DrawState<'a> {
     target: ColorTarget,
     depth_map: DepthMap,
     depth_stencil: Option<DepthStencil>,
-    tex_env: crate::tev::TexEnv,
+    tex_env: &'a crate::tev::TexEnv,
     alpha_test: Option<AlphaTest>,
     blend: Option<crate::blend::Blend>,
     logic_op: Option<crate::blend::LogicOp>,
@@ -2552,7 +2575,7 @@ struct DrawState<'a> {
     texture2_uses_coord1: bool,
     /// texture unit 0 is projected, see projected.
     texture0_projected: bool,
-    lighting: Option<Lighting>,
+    lighting: Option<&'a Lighting>,
     tables: &'a Tables,
     /// texture 3, made up from its coordinates, and its tables.
     proctex: Option<crate::proctex::ProcTex<'a>>,
@@ -2577,7 +2600,7 @@ impl DrawState<'_> {
             depth_map: self.depth_map,
             geometry,
             textures: self.textures,
-            lighting: self.lighting.as_ref(),
+            lighting: self.lighting,
             tables: self.tables,
             proctex: self.proctex.is_some(),
             proctex_tables: self.proctex_tables,
@@ -2749,7 +2772,7 @@ fn fill_triangle(
                 }
             }
 
-            let fragment = state.lighting.as_ref().map(|lighting| {
+            let fragment = state.lighting.map(|lighting| {
                 let quaternion = std::array::from_fn(|i| {
                     interpolate([a.quaternion_over_w[i], b.quaternion_over_w[i], c.quaternion_over_w[i]])
                 });
@@ -2971,7 +2994,7 @@ pub fn draw<M: GpuMemory>(
 
     // an index buffer names most vertices several times, fetch and shade
     // each of them once.
-    let mut scratch = std::mem::take(&mut resources.scratch);
+    let mut scratch = resources.scratch.take().unwrap_or_default();
     read_indices(registers, memory, &mut scratch, indexed);
     let plan = scratch.plans.update(registers, fixed_attributes);
     log::trace!(
@@ -3004,22 +3027,15 @@ pub fn draw<M: GpuMemory>(
             (first_vertex, vertex_count)
         };
         if raw_inputs(plan, memory, attribute_base, first, span, &mut scratch.raw) {
-            scratch.relative.clear();
-            if indexed {
-                // straight from the index buffer, the draw needs its indices
-                // as words only when the CPU decodes its arrays
-                if index_short {
-                    let halves = scratch.bytes.as_chunks::<2>().0.iter();
-                    scratch.relative.extend(halves.map(|b| u16::from_le_bytes(*b) as u32 - first));
-                } else {
-                    scratch.relative.extend(scratch.bytes.iter().map(|&b| b as u32 - first));
-                }
-            } else {
-                scratch.relative.extend(0..vertex_count);
-            }
-            let vertices = Vertices::Raw { vertex_shader, raw: &scratch.raw, vertices: &scratch.relative };
+            // straight from the index buffer, the draw needs its indices
+            // as words only when the CPU decodes its arrays
+            let order = match indexed {
+                true => hardware::RawOrder::Indexed { bytes: &scratch.bytes, short: index_short, first },
+                false => hardware::RawOrder::InARow(vertex_count as usize),
+            };
+            let vertices = Vertices::Raw { vertex_shader, raw: &scratch.raw, order };
             if rasterize(registers, memory, resources, vertices).is_some() {
-                resources.scratch = scratch;
+                resources.scratch = Some(scratch);
                 return vertex_count;
             }
         }
@@ -3028,7 +3044,7 @@ pub fn draw<M: GpuMemory>(
     let order = indexed.then_some(&scratch.order[..]);
     let vertices = Vertices::Unshaded { vertex_shader, geometry_shader, inputs: &scratch.inputs, order };
     rasterize(registers, memory, resources, vertices);
-    resources.scratch = scratch;
+    resources.scratch = Some(scratch);
     vertex_count
 }
 
@@ -3048,10 +3064,13 @@ fn read_indices<M: GpuMemory>(registers: &[u32], memory: &mut M, scratch: &mut S
     let size = if index_short { 2 } else { 1 };
     let len = (registers[REG_VERTEX_COUNT] * size) as usize;
     let bytes = &mut scratch.bytes;
-    bytes.resize(len, 0);
+    bytes.clear();
     match memory.slice(index_base, len) {
-        Some(slice) => bytes.copy_from_slice(slice),
-        None => memory.read(index_base, bytes),
+        Some(slice) => bytes.extend_from_slice(slice),
+        None => {
+            bytes.resize(len, 0);
+            memory.read(index_base, bytes);
+        }
     }
 }
 
@@ -3149,51 +3168,58 @@ fn raw_inputs<M: GpuMemory>(
 /// them, each the vertex it names, into indices.
 fn assemble_into(topology: u32, count: usize, vertex: impl Fn(usize) -> u32, indices: &mut Vec<u32>) {
     indices.clear();
-    // a strip or a fan a triangle at a time, a flattened iterator has no
-    // length to reserve by and pushes a vertex at a time
-    if matches!(topology, 1 | 2) {
-        indices.reserve(count.saturating_sub(2) * 3);
+    if !matches!(topology, 1 | 2) {
+        indices.extend((0..count / 3 * 3).map(vertex));
+        return;
     }
-    match topology {
-        1 => {
-            for i in 2..count {
-                let (a, b) = if i % 2 == 0 { (i - 2, i - 1) } else { (i - 1, i - 2) };
-                indices.extend([vertex(a), vertex(b), vertex(i)]);
-            }
+    // a strip or a fan a triangle at a time, written in place. pushing
+    // kept the length in memory, each push waiting on the last one's
+    indices.resize(count.saturating_sub(2) * 3, 0);
+    let triangles = indices.as_chunks_mut::<3>().0;
+    if topology == 1 {
+        for (i, triangle) in (2..count).zip(triangles) {
+            *triangle = match i % 2 {
+                0 => [vertex(i - 2), vertex(i - 1), vertex(i)],
+                _ => [vertex(i - 1), vertex(i - 2), vertex(i)],
+            };
         }
-        2 => {
-            for i in 2..count {
-                indices.extend([vertex(0), vertex(i - 1), vertex(i)]);
-            }
+    } else {
+        for (i, triangle) in (2..count).zip(triangles) {
+            *triangle = [vertex(0), vertex(i - 1), vertex(i)];
         }
-        _ => indices.extend((0..count / 3 * 3).map(vertex)),
     }
 }
 
-/// the triangles of a draw of count vertices as the GPU takes them, three
-/// vertices each, numbered as the raw arrays number them, or by their place
-/// among the vertices order gives, or by their place in the draw. a list of
-/// raw vertices is its own triangles, which go as they are rather than
-/// copied.
+/// the triangles of a draw of count vertices as the GPU takes them. a list
+/// or a strip of raw vertices goes as the guest's index buffer has it, or
+/// with none for vertices in a row, rather than three indices a triangle,
+/// which a strip has three times the vertices of. the rest go three
+/// vertices a triangle, numbered as the raw arrays number them, or by their
+/// place among the vertices order gives, or by their place in the draw. not
+/// every GPU draws fans (MoltenVK), they stay triangles.
 #[cfg(feature = "vulkan")]
-fn triangle_indices<'a>(
+fn primitives<'a>(
     topology: u32,
     count: usize,
-    raw: Option<&'a [u32]>,
+    raw: Option<hardware::RawOrder<'a>>,
     order: Option<&[usize]>,
     assembled: &'a mut Vec<u32>,
-) -> &'a [u32] {
+) -> hardware::Primitives<'a> {
+    use hardware::RawOrder;
     match raw {
-        Some(vertices) if !matches!(topology, 1 | 2) => &vertices[..count / 3 * 3],
-        Some(vertices) => {
-            assemble_into(topology, count, |i| vertices[i], assembled);
-            assembled
+        Some(order) if topology != 2 => return hardware::Primitives::Raw { strip: topology == 1, order },
+        Some(RawOrder::InARow(_)) => assemble_into(topology, count, |i| i as u32, assembled),
+        Some(RawOrder::Indexed { bytes, short: true, first }) => {
+            let halves = &bytes.as_chunks::<2>().0[..count];
+            assemble_into(topology, count, |i| u16::from_le_bytes(halves[i]) as u32 - first, assembled);
         }
-        None => {
-            assemble_into(topology, count, |i| order.map_or(i, |order| order[i]) as u32, assembled);
-            assembled
+        Some(RawOrder::Indexed { bytes, short: false, first }) => {
+            let bytes = &bytes[..count];
+            assemble_into(topology, count, |i| bytes[i] as u32 - first, assembled);
         }
+        None => assemble_into(topology, count, |i| order.map_or(i, |order| order[i]) as u32, assembled),
     }
+    hardware::Primitives::Triangles(assembled)
 }
 
 /// the vertices of each triangle out of count of them, for a list, a strip
@@ -3229,6 +3255,10 @@ fn rasterize<M: GpuMemory>(registers: &[u32], memory: &mut M, resources: &mut Re
     // drawing stays inside the viewport, its rows turned over on a buffer
     // upside down
     let (bottom, top) = ((viewport_y.round() as i32).max(0), viewport_top.min(buffer_height as i32));
+    let (left, right) = ((viewport_x.round() as i32).max(0), viewport_right.min(buffer_width as i32));
+    // and inside the scissor's rectangle, Fire Emblem Awakening scrolls a line of text up out
+    // of its box under one (B03)
+    let ((left, bottom), (right, top)) = scissored(registers, (left, bottom), (right, top));
     let (bottom, top) = match upside_down(registers) {
         true => (buffer_height as i32 - top, buffer_height as i32 - bottom),
         false => (bottom, top),
@@ -3267,8 +3297,12 @@ fn rasterize<M: GpuMemory>(registers: &[u32], memory: &mut M, resources: &mut Re
             // one memory holds as drawn is still the GPU's to copy, unless
             // the unit reads smaller sizes after it, which memory has
             let one_size = |texture: &DrawnTexture| level_count(registers, TEXTURE_UNIT_BASES[unit], texture.width, texture.height) == 1;
-            *drawn = drawn_texture(registers, memory, unit)
-                .filter(|texture| hardware.holds(texture) || (one_size(texture) && hardware.holds_unchanged(memory, texture)));
+            let candidate = drawn_texture(registers, memory, unit);
+            // a texture that starts before a buffer the GPU drew, around it (B04 D1)
+            if let Some(texture) = &candidate {
+                hardware.merge_for_texture(memory, texture);
+            }
+            *drawn = candidate.filter(|texture| hardware.holds(texture) || (one_size(texture) && hardware.holds_unchanged(memory, texture)));
             if let Some(texture) = drawn {
                 past[unit] = !hardware.covers(texture);
                 continue;
@@ -3288,9 +3322,9 @@ fn rasterize<M: GpuMemory>(registers: &[u32], memory: &mut M, resources: &mut Re
     let state = DrawState {
         target: ColorTarget {
             addr: target_addr,
-            left: (viewport_x.round() as i32).max(0),
+            left,
             bottom,
-            right: viewport_right.min(buffer_width as i32),
+            right,
             top,
             buffer_width,
             buffer_height,
@@ -3331,7 +3365,7 @@ fn rasterize<M: GpuMemory>(registers: &[u32], memory: &mut M, resources: &mut Re
             Vertices::Unshaded { vertex_shader, inputs, order, .. } => {
                 Some((vertex_shader, hardware::Inputs::Decoded(inputs), order, None))
             }
-            Vertices::Raw { vertex_shader, raw, vertices } => Some((vertex_shader, hardware::Inputs::Raw(raw), None, Some(vertices))),
+            Vertices::Raw { vertex_shader, raw, order } => Some((vertex_shader, hardware::Inputs::Raw(raw), None, Some(order))),
             Vertices::Shaded(_) | Vertices::Prepared(_) => None,
         };
         if let Some((unit, inputs, order, raw)) = unshaded.filter(|_| hardware.shades() && whole && registers[REG_GEOSTAGE_CONFIG] & 0x3 != 2) {
@@ -3344,17 +3378,17 @@ fn rasterize<M: GpuMemory>(registers: &[u32], memory: &mut M, resources: &mut Re
             // with y pointing up.
             let cull_mode = registers[REG_FACE_CULLING] & 0x3;
             let mut assembled = std::mem::take(&mut resources.triangles);
-            let indices = triangle_indices(topology, vertex_count, raw, order, &mut assembled);
+            let primitives = primitives(topology, vertex_count, raw, order, &mut assembled);
             let shading = hardware::Shading {
                 unit,
                 inputs,
-                indices,
+                primitives,
                 semantics: resources.semantics.get(registers),
                 viewport,
                 cull: cull_mode,
             };
             let drawn = hardware.draw(memory, &state.hardware(registers, hardware::Geometry::Shaded(&shading)));
-            let triangles = (indices.len() / 3) as u32;
+            let triangles = primitives.triangles() as u32;
             resources.triangles = assembled;
             match drawn {
                 Ok(()) => return Some(triangles),
@@ -3731,6 +3765,52 @@ mod tests {
     /// an 8x8 RGBA8 target with color writes on and a D24S8 buffer beside it.
     fn rasterize_shaded<M: GpuMemory>(registers: &[u32], memory: &mut M, resources: &mut Resources, shaded: &[Vertex]) -> u32 {
         rasterize(registers, memory, resources, Vertices::Shaded(shaded)).unwrap_or(0)
+    }
+
+    /// B03: the scissor test keeping drawing inside its rectangle, both corners' pixels
+    /// in, its y counted up from the window's bottom as the viewport's is, in software and
+    /// on the GPU at every scale. Fire Emblem Awakening clips a line scrolling out of its
+    /// text box with it.
+    #[test]
+    fn the_scissor_keeps_drawing_inside_its_rectangle() {
+        let mut registers = target_registers();
+        registers[REG_SCISSOR_MODE] = 3;
+        registers[REG_SCISSOR_FIRST] = 2 | 1 << 16;
+        registers[REG_SCISSOR_LAST] = 4 | 5 << 16;
+        let check = |memory: &mut ConsoleMemory, what: &str| {
+            let mut bytes = vec![0u8; 8 * 8 * 4];
+            memory.read(COLOR, &mut bytes);
+            for y in 0..8u32 {
+                for x in 0..8u32 {
+                    // memory's rows run down from the window's top
+                    let at = crate::format::morton_offset(x, 7 - y, 8, 4) as usize;
+                    let drawn = ColorFormat::Rgba8.decode(&bytes[at..at + 4]) == [255, 0, 0, 255];
+                    let inside = (2..=4).contains(&x) && (1..=5).contains(&y);
+                    assert_eq!(drawn, inside, "{what}: pixel ({x}, {y})");
+                }
+            }
+        };
+        let mut memory = ConsoleMemory::default();
+        let mut resources = Resources::default();
+        rasterize_shaded(&registers, &mut memory, &mut resources, &cover(-0.5, RED));
+        check(&mut memory, "software");
+        #[cfg(feature = "vulkan")]
+        for scale in [1, 4] {
+            let Ok(mut hardware) = hardware::Hardware::new() else { return };
+            assert_eq!(hardware.set_scale(scale), scale);
+            let mut memory = ConsoleMemory::default();
+            let mut resources = Resources { hardware: Some(hardware), ..Default::default() };
+            rasterize_shaded(&registers, &mut memory, &mut resources, &cover(-0.5, RED));
+            resources.hardware.as_mut().unwrap().flush(&mut memory).unwrap();
+            check(&mut memory, &format!("GPU at {scale}x"));
+        }
+        // off, everything
+        registers[REG_SCISSOR_MODE] = 0;
+        let mut memory = ConsoleMemory::default();
+        rasterize_shaded(&registers, &mut memory, &mut Resources::default(), &cover(-0.5, RED));
+        let mut bytes = vec![0u8; 8 * 8 * 4];
+        memory.read(COLOR, &mut bytes);
+        assert!(bytes.as_chunks::<4>().0.iter().all(|p| ColorFormat::Rgba8.decode(p) == [255, 0, 0, 255]));
     }
 
     fn target_registers() -> Vec<u32> {
@@ -4128,6 +4208,11 @@ mod tests {
         assert!(cache.checked(key, 256).is_none(), "a draw over it");
         cache.decoded(key, &[0x11; 256]);
         assert!(cache.checked(key, 256).is_some(), "checked again after the draw");
+        // buffers drawn into in turn, the one over it again after
+        cache.wrote(0x5000, 0x100);
+        assert!(cache.checked(key, 256).is_some(), "drawn over before it was checked");
+        cache.wrote(0x1080, 0x10);
+        assert!(cache.checked(key, 256).is_none(), "drawn over again");
         cache.begin_list();
         assert!(cache.checked(key, 256).is_none(), "a new list");
     }
@@ -5007,6 +5092,274 @@ mod tests {
         assert!(!hardware.display_transfer(&mut memory, &transfer(COLOR + 256, COLOR + 384)).unwrap());
     }
 
+    /// a texture copy of whole rows of tiles out of a buffer the GPU drew is
+    /// done on the GPU and leaves memory holding the same bytes the CPU's
+    /// copy would, as Fire Emblem Awakening copies its scene for depth of
+    /// field. a copy of part of a row of tiles goes to the CPU.
+    #[cfg(feature = "vulkan")]
+    #[test]
+    fn a_texture_copy_of_a_buffer_the_gpu_drew_stays_on_the_gpu() {
+        const OUTPUT: u32 = 0x10_0000;
+        let Ok(hardware) = hardware::Hardware::new() else { return };
+        let mut registers = target_registers();
+        // eight by sixteen, two rows of tiles
+        registers[REG_VIEWPORT_HEIGHT] = float24(8.0);
+        registers[REG_FRAMEBUFFER_DIMENSIONS] = 8 | (15 << 12) | 1 << 24;
+        let mut memory = ConsoleMemory::default();
+        let mut resources = Resources { hardware: Some(hardware), ..Default::default() };
+        rasterize_shaded(&registers, &mut memory, &mut resources, &cover(-0.5, RED));
+        let hardware = resources.hardware.as_mut().unwrap();
+        let size = 8 * 16 * 4;
+        assert!(!hardware.texture_copy(&mut memory, COLOR, OUTPUT, 100).unwrap(), "part of a row of tiles");
+        assert!(hardware.texture_copy(&mut memory, COLOR, OUTPUT, size).unwrap(), "the CPU did it");
+        hardware.flush(&mut memory).unwrap();
+        let (mut input, mut output) = (vec![0u8; size as usize], vec![0u8; size as usize]);
+        memory.read(COLOR, &mut input);
+        memory.read(OUTPUT, &mut output);
+        assert_eq!(input, output, "the same bytes as a copy on the CPU");
+        assert!(output.as_chunks::<4>().0.iter().any(|p| ColorFormat::Rgba8.decode(p) == [255, 0, 0, 255]), "what was drawn");
+    }
+
+    /// B07: a compute pass in the middle of a batch, here the copy of a buffer the GPU drew,
+    /// has the next draw push all its bindings again rather than only those that changed. the
+    /// Adreno 740's driver lets the compute pass's pushed set disturb the draws', which no
+    /// desktop driver shows, so this pins the bookkeeping.
+    #[cfg(feature = "vulkan")]
+    #[test]
+    fn a_draw_after_a_compute_pass_pushes_every_binding_again() {
+        const OUTPUT: u32 = 0x10_0000;
+        let Ok(hardware) = hardware::Hardware::new() else { return };
+        let mut registers = target_registers();
+        registers[REG_VIEWPORT_HEIGHT] = float24(8.0);
+        registers[REG_FRAMEBUFFER_DIMENSIONS] = 8 | (15 << 12) | 1 << 24;
+        let mut memory = ConsoleMemory::default();
+        let mut resources = Resources { hardware: Some(hardware), ..Default::default() };
+        rasterize_shaded(&registers, &mut memory, &mut resources, &cover(-0.5, RED));
+        let hardware = resources.hardware.as_mut().unwrap();
+        assert!(!hardware.pushes_all(), "the draw pushed its bindings");
+        assert!(hardware.texture_copy(&mut memory, COLOR, OUTPUT, 8 * 16 * 4).unwrap(), "the CPU did it");
+        assert!(hardware.pushes_all(), "the copy's compute pass left the draw's bindings as pushed");
+        rasterize_shaded(&registers, &mut memory, &mut resources, &cover(-0.6, GREEN));
+        let hardware = resources.hardware.as_mut().unwrap();
+        assert!(!hardware.pushes_all(), "the next draw pushed them again");
+        hardware.flush(&mut memory).unwrap();
+        let mut output = vec![0u8; 8 * 16 * 4];
+        memory.read(COLOR, &mut output);
+        assert!(output.as_chunks::<4>().0.iter().all(|p| ColorFormat::Rgba8.decode(p) == [0, 255, 0, 255]), "the second draw, drawn right");
+    }
+
+    /// B04: a buffer the GPU drew at COLOR (8x16), and memory's own row of tiles before it,
+    /// a blue one, which reads that start a row of tiles early take in.
+    #[cfg(feature = "vulkan")]
+    fn drawn_after_memory_rows(scale: u32) -> Option<(ConsoleMemory, Resources)> {
+        let mut hardware = hardware::Hardware::new().ok()?;
+        assert_eq!(hardware.set_scale(scale), scale, "the GPU draws at the scale");
+        let mut registers = target_registers();
+        registers[REG_VIEWPORT_HEIGHT] = float24(8.0);
+        registers[REG_FRAMEBUFFER_DIMENSIONS] = 8 | (15 << 12) | 1 << 24;
+        let mut memory = ConsoleMemory::default();
+        let mut pixel = [0u8; 4];
+        ColorFormat::Rgba8.encode([0, 0, 255, 255], &mut pixel);
+        let blue: Vec<u8> = (0..64).flat_map(|_| pixel).collect();
+        memory.write(COLOR - 256, &blue);
+        let mut resources = Resources { hardware: Some(hardware), ..Default::default() };
+        rasterize_shaded(&registers, &mut memory, &mut resources, &cover(-0.5, RED));
+        Some((memory, resources))
+    }
+
+    #[cfg(feature = "vulkan")]
+    fn decoded(memory: &mut ConsoleMemory, addr: u32, len: usize) -> Vec<[u8; 4]> {
+        let mut bytes = vec![0u8; len];
+        memory.read(addr, &mut bytes);
+        bytes.as_chunks::<4>().0.iter().map(|p| ColorFormat::Rgba8.decode(p)).collect()
+    }
+
+    /// B04 D1: a transfer whose input starts a row of tiles before a buffer the GPU drew
+    /// merges the buffer into one around it on the GPU rather than writing it back, and
+    /// leaves memory as a transfer on the CPU would.
+    #[cfg(feature = "vulkan")]
+    #[test]
+    fn a_transfer_starting_before_a_drawn_buffer_merges_it_on_the_gpu() {
+        for scale in [1, 2, 4] {
+            const OUTPUT: u32 = 0x10_0000;
+            let Some((mut memory, mut resources)) = drawn_after_memory_rows(scale) else { return };
+            let hardware = resources.hardware.as_mut().unwrap();
+            let transfer = hardware::Transfer {
+                input: COLOR - 256,
+                output: OUTPUT,
+                input_width: 8,
+                output_width: 8,
+                output_height: 24,
+                copy: (8, 24),
+                scale: (1, 1),
+                flip: false,
+                input_linear: false,
+                output_tiled: true,
+                input_format: ColorFormat::Rgba8,
+                output_format: ColorFormat::Rgba8,
+            };
+            assert!(hardware.display_transfer(&mut memory, &transfer).unwrap(), "the CPU did it");
+            // the drawn rows are now rows of the merged buffer, found from either start
+            let texture = |addr, height| DrawnTexture { addr, width: 8, height, format: ColorFormat::Rgba8 };
+            assert!(hardware.holds(&texture(COLOR - 256, 24)), "the merged buffer holds the drawing");
+            assert!(hardware.holds(&texture(COLOR, 16)), "found inside the merged buffer");
+            hardware.flush(&mut memory).unwrap();
+            let (input, output) = (decoded(&mut memory, COLOR - 256, 768), decoded(&mut memory, OUTPUT, 768));
+            assert_eq!(input, output, "an identity transfer");
+            assert!(input[..64].iter().all(|&p| p == [0, 0, 255, 255]), "memory's row of tiles stays");
+            assert!(input[64..].iter().all(|&p| p == [255, 0, 0, 255]), "the drawing reaches memory");
+        }
+    }
+
+    /// B04 D1 for a texture: one that starts before a buffer the GPU drew is copied from
+    /// the merged buffer, not memory.
+    #[cfg(feature = "vulkan")]
+    #[test]
+    fn a_texture_starting_before_a_drawn_buffer_merges_it_on_the_gpu() {
+        for scale in [1, 2, 4] {
+            let Some((mut memory, mut resources)) = drawn_after_memory_rows(scale) else { return };
+            let hardware = resources.hardware.as_mut().unwrap();
+            let texture = DrawnTexture { addr: COLOR - 256, width: 8, height: 24, format: ColorFormat::Rgba8 };
+            assert!(!hardware.holds(&texture), "nothing holds it before the merge");
+            hardware.merge_for_texture(&mut memory, &texture);
+            assert!(hardware.holds(&texture));
+            hardware.flush(&mut memory).unwrap();
+            let rows = decoded(&mut memory, COLOR - 256, 768);
+            assert!(rows[..64].iter().all(|&p| p == [0, 0, 255, 255]));
+            assert!(rows[64..].iter().all(|&p| p == [255, 0, 0, 255]));
+        }
+    }
+
+    /// B04 D2: a texture copy into rows of a merged buffer goes into it on the GPU, rather
+    /// than into a new buffer over it, which would write it back.
+    #[cfg(feature = "vulkan")]
+    #[test]
+    fn a_texture_copy_into_a_merged_buffer_stays_in_it() {
+        for scale in [1, 2, 4] {
+            const OTHER: u32 = 0x6000;
+            let Some((mut memory, mut resources)) = drawn_after_memory_rows(scale) else { return };
+            let texture = |addr, height| DrawnTexture { addr, width: 8, height, format: ColorFormat::Rgba8 };
+            resources.hardware.as_mut().unwrap().merge_for_texture(&mut memory, &texture(COLOR - 256, 24));
+            // another buffer drawn green
+            let mut other = target_registers();
+            other[REG_VIEWPORT_HEIGHT] = float24(8.0);
+            other[REG_FRAMEBUFFER_DIMENSIONS] = 8 | (15 << 12) | 1 << 24;
+            other[REG_COLOR_BUFFER_ADDRESS] = OTHER >> 3;
+            other[REG_DEPTH_BUFFER_ADDRESS] = 0x8000 >> 3;
+            rasterize_shaded(&other, &mut memory, &mut resources, &cover(-0.5, GREEN));
+            let hardware = resources.hardware.as_mut().unwrap();
+            assert!(hardware.texture_copy(&mut memory, OTHER, COLOR, 8 * 16 * 4).unwrap(), "the CPU did it");
+            assert!(hardware.holds(&texture(COLOR - 256, 24)), "the merged buffer still holds its rows");
+            hardware.flush(&mut memory).unwrap();
+            let rows = decoded(&mut memory, COLOR - 256, 768);
+            assert!(rows[..64].iter().all(|&p| p == [0, 0, 255, 255]), "memory's row of tiles stays");
+            assert_eq!(rows[64..], decoded(&mut memory, OTHER, 512)[..], "the copied rows");
+            assert!(rows[64..].iter().all(|&p| p == [0, 255, 0, 255]));
+        }
+    }
+
+    /// B04: with nothing the GPU drew that memory lacks, a transfer starting before a
+    /// buffer goes the usual way and nothing merges.
+    #[cfg(feature = "vulkan")]
+    #[test]
+    fn a_buffer_memory_already_has_is_not_merged() {
+        let Some((mut memory, mut resources)) = drawn_after_memory_rows(1) else { return };
+        let hardware = resources.hardware.as_mut().unwrap();
+        hardware.flush(&mut memory).unwrap();
+        let texture = DrawnTexture { addr: COLOR - 256, width: 8, height: 24, format: ColorFormat::Rgba8 };
+        hardware.merge_for_texture(&mut memory, &texture);
+        assert!(!hardware.holds(&texture), "memory has it all");
+    }
+
+    /// B04 D3: a texture copy of whole tiles of each row of tiles of a buffer the GPU drew,
+    /// skipping the rest of each row, is a rectangle of the buffer copied on the GPU, and
+    /// memory ends up as the CPU's copy would leave it. lines of part of a tile go to the CPU.
+    #[cfg(feature = "vulkan")]
+    #[test]
+    fn a_strided_texture_copy_of_whole_tiles_stays_on_the_gpu() {
+        const OUTPUT: u32 = 0x10_0000;
+        for scale in [1, 2, 4] {
+            for column in [0u32, 1] {
+                let Ok(mut hardware) = hardware::Hardware::new() else { return };
+                assert_eq!(hardware.set_scale(scale), scale);
+                // sixteen by sixteen, two tiles across and two rows of tiles down
+                let mut registers = target_registers();
+                registers[REG_VIEWPORT_WIDTH] = float24(8.0);
+                registers[REG_VIEWPORT_HEIGHT] = float24(8.0);
+                registers[REG_FRAMEBUFFER_DIMENSIONS] = 16 | (15 << 12) | 1 << 24;
+                let mut memory = ConsoleMemory::default();
+                let mut resources = Resources { hardware: Some(hardware), ..Default::default() };
+                rasterize_shaded(&registers, &mut memory, &mut resources, &cover(-0.5, RED));
+                // green over part of it, so each rectangle differs
+                let corner: Vec<Vertex> = cover(-0.6, GREEN)
+                    .into_iter()
+                    .zip([[-1.0, -1.0], [0.4, -1.0], [-1.0, 0.7]])
+                    .map(|(mut v, [x, y])| {
+                        v.clip[0] = x;
+                        v.clip[1] = y;
+                        v
+                    })
+                    .collect();
+                rasterize_shaded(&registers, &mut memory, &mut resources, &corner);
+                let hardware = resources.hardware.as_mut().unwrap();
+                // one tile of each row of tiles: a line of 256 bytes, skipping the other 256
+                let input = COLOR + column * 256;
+                assert!(!hardware.strided_texture_copy(&mut memory, input, OUTPUT, 256, 128, 384).unwrap(), "part of a tile");
+                assert!(hardware.strided_texture_copy(&mut memory, input, OUTPUT, 512, 256, 256).unwrap(), "the CPU did it");
+                hardware.flush(&mut memory).unwrap();
+                let mut source = vec![0u8; 1024];
+                memory.read(COLOR, &mut source);
+                let pick = |column: u32| -> Vec<u8> { (0..2).flat_map(|line| source[(column * 256 + line * 512) as usize..][..256].to_vec()).collect() };
+                assert_ne!(pick(0), pick(1), "the two columns differ, so a wrong rectangle shows");
+                let expected = pick(column);
+                let mut copied = vec![0u8; 512];
+                memory.read(OUTPUT, &mut copied);
+                assert_eq!(copied, expected, "scale {scale}, column {column}: the bytes a copy on the CPU leaves");
+            }
+        }
+    }
+
+    /// B05: a transfer's output nobody reads stops being copied for the host after a few
+    /// frames, and memory still gets the newest picture when something does read it.
+    #[cfg(feature = "vulkan")]
+    #[test]
+    fn an_output_left_unread_is_still_right_once_read() {
+        const OUTPUT: u32 = 0x10_0000;
+        let Ok(hardware) = hardware::Hardware::new() else { return };
+        let mut registers = target_registers();
+        registers[REG_VIEWPORT_HEIGHT] = float24(8.0);
+        registers[REG_FRAMEBUFFER_DIMENSIONS] = 8 | (15 << 12) | 1 << 24;
+        let mut memory = ConsoleMemory::default();
+        let mut resources = Resources { hardware: Some(hardware), ..Default::default() };
+        let transfer = hardware::Transfer {
+            input: COLOR,
+            output: OUTPUT,
+            input_width: 8,
+            output_width: 8,
+            output_height: 16,
+            copy: (8, 16),
+            scale: (1, 1),
+            flip: false,
+            input_linear: false,
+            output_tiled: true,
+            input_format: ColorFormat::Rgba8,
+            output_format: ColorFormat::Rgba8,
+        };
+        // red, transferred over and over with nothing reading the output
+        for _ in 0..8 {
+            rasterize_shaded(&registers, &mut memory, &mut resources, &cover(-0.5, RED));
+            assert!(resources.hardware.as_mut().unwrap().display_transfer(&mut memory, &transfer).unwrap());
+        }
+        // then green, and memory read
+        rasterize_shaded(&registers, &mut memory, &mut resources, &cover(-0.5, GREEN));
+        let hardware = resources.hardware.as_mut().unwrap();
+        assert!(hardware.display_transfer(&mut memory, &transfer).unwrap());
+        hardware.flush(&mut memory).unwrap();
+        let mut out = [0u8; 512];
+        memory.read(OUTPUT, &mut out);
+        assert!(out.as_chunks::<4>().0.iter().all(|p| ColorFormat::Rgba8.decode(p) == [0, 255, 0, 255]), "the newest picture");
+    }
+
     /// a transfer on the GPU of an 8 pixel wide buffer at COLOR, of rows
     /// pixels, to a plain one at OUTPUT, and the pixels it leaves there.
     #[cfg(feature = "vulkan")]
@@ -5308,6 +5661,10 @@ mod tests {
         /// how long each slice handed out was, a whole array's for the GPU
         /// among them, a vertex's when the CPU decodes them.
         sliced: Vec<usize>,
+        /// the writes so far, and the one each 256 bytes of the arrays last
+        /// had, which watches go by as the console's pages.
+        writes: u64,
+        written: Vec<u64>,
     }
 
     #[cfg(feature = "vulkan")]
@@ -5315,7 +5672,7 @@ mod tests {
         const START: u32 = 0x1400_0000;
 
         fn new() -> ArrayMemory {
-            ArrayMemory { rest: ConsoleMemory::default(), arrays: vec![0; 0x1_0000], sliced: Vec::new() }
+            ArrayMemory { rest: ConsoleMemory::default(), arrays: vec![0; 0x1_0000], sliced: Vec::new(), writes: 0, written: vec![0; 0x100] }
         }
 
         fn at(&self, addr: u32) -> Option<usize> {
@@ -5340,10 +5697,14 @@ mod tests {
         }
 
         fn write(&mut self, addr: u32, data: &[u8]) {
+            self.writes += 1;
             for (i, &byte) in data.iter().enumerate() {
                 let addr = addr + i as u32;
                 match self.at(addr) {
-                    Some(at) => self.arrays[at] = byte,
+                    Some(at) => {
+                        self.arrays[at] = byte;
+                        self.written[at >> 8] = self.writes;
+                    }
                     None => self.rest.write(addr, &[byte]),
                 }
             }
@@ -5359,6 +5720,110 @@ mod tests {
             self.sliced.push(len);
             Some(&self.arrays[at..end])
         }
+
+        fn watch(&mut self, addr: u32, len: u32) -> Option<u64> {
+            let at = self.at(addr)?;
+            (at + len as usize <= self.arrays.len()).then_some(self.writes)
+        }
+
+        fn unchanged(&mut self, addr: u32, len: u32, watch: u64) -> bool {
+            self.at(addr).is_some_and(|at| self.written[at >> 8..(at + len as usize).div_ceil(0x100)].iter().all(|&write| write <= watch))
+        }
+    }
+
+    /// a draw's arrays, once they stayed the same, go to the GPU once and
+    /// are drawn from there in later batches, until a title writes over
+    /// them, the draws coming out as those whose vertices the CPU decodes.
+    #[cfg(feature = "vulkan")]
+    #[test]
+    fn arrays_kept_on_the_gpu_draw_what_memory_has() {
+        const SIZE: u32 = 32;
+        const BASE: u32 = 0x2000_0000;
+        const INDICES: u32 = 0x6000;
+        const VERTICES: u32 = 24;
+        const IDENTITY: u32 = 0x1B << 5 | 0x1B << 14 | 0x1B << 23;
+        let Ok(hardware) = hardware::Hardware::new() else { return };
+        let mut unit = ShaderUnit::new();
+        unit.descriptors[0] = 0xF | IDENTITY;
+        let op = |opcode: u32, destination: u32, src1: u32, src2: u32| opcode << 26 | destination << 21 | src1 << 12 | src2 << 7;
+        // o0 = c0 * v0, o1 = c1 * v1
+        let program = [op(0x08, 0x00, 0x20, 0x00), op(0x08, 0x01, 0x21, 0x01), 0x22 << 26];
+        unit.program[..program.len()].copy_from_slice(&program);
+        unit.float_uniforms[0] = [0.9, 0.9, 1.0, 1.0];
+        unit.float_uniforms[1] = [1.0 / 255.0; 4];
+        unit.prepare();
+        let fixed = [shader::ZERO; 16];
+        let mut registers = target_registers();
+        registers[REG_VIEWPORT_WIDTH] = float24(SIZE as f32 / 2.0);
+        registers[REG_VIEWPORT_HEIGHT] = float24(SIZE as f32 / 2.0);
+        registers[REG_FRAMEBUFFER_DIMENSIONS] = SIZE | ((SIZE - 1) << 12) | 1 << 24;
+        registers[REG_SHADER_OUTPUT_TOTAL] = 2;
+        registers[REG_SHADER_OUTPUT_MAP] = 0x0302_0100;
+        registers[REG_SHADER_OUTPUT_MAP + 1] = 0x0B0A_0908;
+        registers[REG_VS_OUTPUT_MASK] = 0b11;
+        registers[REG_ATTRIBUTE_BASE] = BASE >> 3;
+        registers[REG_VS_NUM_INPUT_ATTRIBUTES] = 1;
+        registers[REG_VS_BLOCK + SHADER_INPUT_MAP_LOW] = 0x10;
+        // two floats of position from one array, four bytes of color from
+        // another, drawn as a strip
+        registers[REG_ATTRIBUTE_FORMAT_LOW] = (1 << 2 | 3) | (3 << 2 | 1) << 4;
+        registers[REG_ATTRIBUTE_FORMAT_HIGH] = 1 << 28;
+        for (i, (offset, stride, id)) in [(0x100u32, 8u32, 0u32), (0x800, 4, 1)].into_iter().enumerate() {
+            let at = REG_ATTRIBUTE_LOADER + i * 3;
+            registers[at] = offset;
+            registers[at + 1] = id;
+            registers[at + 2] = stride << 16 | 1 << 28;
+        }
+        registers[REG_PRIMITIVE_CONFIG] = 1 << 8;
+        registers[REG_VERTEX_COUNT] = VERTICES;
+        registers[REG_INDEX_ARRAY] = INDICES | 1 << 31;
+
+        let mut seed = 5u32;
+        let mut random = move || {
+            seed = seed.wrapping_mul(1_664_525).wrapping_add(1_013_904_223);
+            seed >> 8
+        };
+        let mut positions = || -> Vec<u8> {
+            (0..VERTICES * 2).flat_map(|_| ((random() & 0xFFFF) as f32 / 65536.0 * 1.8 - 0.9).to_le_bytes()).collect()
+        };
+        let first = positions();
+        let moved = positions();
+        let colors: Vec<u8> = (0..VERTICES * 4).map(|i| (i * 37 % 251) as u8).collect();
+        let indices: Vec<u8> = (0..VERTICES as u16).flat_map(|i| (i * 7 % VERTICES as u16).to_le_bytes()).collect();
+        let (mut decoded, mut raw) = (ConsoleMemory::default(), ArrayMemory::new());
+        for (at, bytes) in [(0x100, &first), (0x800, &colors), (INDICES, &indices)] {
+            decoded.write(0x1400_0000 + at, bytes);
+            raw.write(0x1400_0000 + at, bytes);
+        }
+        let mut resources = Resources { hardware: Some(hardware), ..Default::default() };
+        let mut kept = Vec::new();
+        for round in 0..6 {
+            // a title moving what it draws writes over the arrays
+            if round == 3 {
+                decoded.write(0x1400_0000 + 0x100, &moved);
+                raw.write(0x1400_0000 + 0x100, &moved);
+            }
+            decoded.write(COLOR, &vec![0u8; (SIZE * SIZE * 4) as usize]);
+            raw.write(COLOR, &vec![0u8; (SIZE * SIZE * 4) as usize]);
+            draw(&registers, &unit, &unit, &fixed, &mut decoded, &mut resources, true, None);
+            resources.hardware.as_mut().unwrap().flush(&mut decoded).unwrap();
+            draw(&registers, &unit, &unit, &fixed, &mut raw, &mut resources, true, None);
+            resources.hardware.as_mut().unwrap().flush(&mut raw).unwrap();
+            let (mut a, mut b) = (vec![0u8; (SIZE * SIZE * 4) as usize], vec![0u8; (SIZE * SIZE * 4) as usize]);
+            decoded.read(COLOR, &mut a);
+            raw.read(COLOR, &mut b);
+            let drawn = a.chunks(4).filter(|pixel| *pixel != [0; 4]).count();
+            assert!(drawn > 50, "round {round}, only {drawn} pixels drawn");
+            assert!(a == b, "round {round}: the kept arrays draw differently");
+            kept.push(resources.hardware.as_ref().unwrap().heap_used());
+        }
+        // new, then the same twice and kept, then written over and new,
+        // then kept again where the heap goes on
+        assert_eq!(kept[0], 0);
+        assert!(kept[1] > 0);
+        assert_eq!((kept[2], kept[3]), (kept[1], kept[1]));
+        assert!(kept[4] > kept[3]);
+        assert_eq!(kept[5], kept[4]);
     }
 
     /// draws from vertex arrays the GPU decodes itself come out as those
@@ -5973,6 +6438,274 @@ mod tests {
         registers[REG_DEPTHMAP_ENABLE] = random.next() & 1;
     }
 
+    /// B05: random fragment stages bent so a specialized pipeline takes its shortcuts, the
+    /// alpha test before lighting and the combiners (alpha inputs that read neither lighting
+    /// nor a color channel of an earlier result, no DOT3_RGBA, the test on), or lighting
+    /// left out (no stage reads it), still draw to the bit what the generic shader draws,
+    /// which takes neither.
+    #[cfg(feature = "vulkan")]
+    #[test]
+    fn specialized_shortcuts_draw_like_the_generic_shader() {
+        let (Ok(mut generic), Ok(specialized)) = (hardware::Hardware::new(), hardware::Hardware::new()) else {
+            return;
+        };
+        generic.set_generic(true);
+        const TEXTURES: u32 = 0x8_0000;
+        const STAGES: [usize; 6] = [0x0C0, 0x0C8, 0x0D0, 0x0D8, 0x0F0, 0x0F8];
+        let lit = |source: u32| source == 1 || source == 2;
+        let chained = |source: u32| source > 6 && source != 0xE;
+        let mut random = Random(77);
+        let mut generics = Resources { hardware: Some(generic), ..Default::default() };
+        let mut specializeds = Resources { hardware: Some(specialized), ..Default::default() };
+        let bytes = (TRANSLATION_SIZE * TRANSLATION_SIZE * 4) as usize;
+        let (mut early, mut unlit, mut drawn) = (0, 0, 0);
+        let (mut differing, mut dump) = (Vec::new(), Vec::new());
+        for case in 0..240 {
+            let mut registers = translation_registers();
+            random_fragment_stages(&mut random, &mut registers, TEXTURES);
+            if case % 2 == 0 {
+                // the alpha test first: alpha inputs off lighting and off earlier colors
+                for base in STAGES {
+                    for i in 0..3 {
+                        let shift = 16 + 4 * i;
+                        let mut source = (registers[base] >> shift) & 0xF;
+                        if lit(source) {
+                            source = 3 + random.next() % 4;
+                            registers[base] = registers[base] & !(0xF << shift) | source << shift;
+                        }
+                        let operand_shift = 12 + 4 * i;
+                        if chained(source) && (registers[base + 1] >> operand_shift) & 7 >= 2 {
+                            registers[base + 1] &= !(6 << operand_shift);
+                        }
+                    }
+                    if registers[base + 2] & 0xF == 7 {
+                        registers[base + 2] = registers[base + 2] & !0xF | 1;
+                    }
+                }
+                registers[REG_ALPHA_TEST] |= 1;
+                registers[crate::lighting::REG_ENABLE] = 1;
+                early += 1;
+            } else {
+                // lighting on, but no stage reads it
+                for base in STAGES {
+                    for shift in [0, 4, 8, 16, 20, 24] {
+                        if lit((registers[base] >> shift) & 0xF) {
+                            registers[base] = registers[base] & !(0xF << shift) | (3 + random.next() % 4) << shift;
+                        }
+                    }
+                }
+                registers[crate::lighting::REG_ENABLE] = 1;
+                unlit += 1;
+            }
+            // lighting in the inputs the operations leave unread, as Fire Emblem Awakening's
+            // pass-through stages have, which must not keep the shortcuts from applying
+            for base in STAGES {
+                for (sources_shift, op) in [(0, registers[base + 2] & 0xF), (16, (registers[base + 2] >> 16) & 0xF)] {
+                    if op == 0 {
+                        registers[base] = registers[base] & !(0xF << (sources_shift + 4)) | 1 << (sources_shift + 4);
+                    }
+                    if !(op == 4 || op >= 8) {
+                        registers[base] = registers[base] & !(0xF << (sources_shift + 8)) | 2 << (sources_shift + 8);
+                    }
+                }
+            }
+            // the shader's conditions hold, so the shortcuts are what is drawn, worked out
+            // the way the pipeline's key holds the registers
+            let mut fragment = [0u32; 28];
+            for (stage, base) in STAGES.into_iter().enumerate() {
+                fragment[stage] = registers[base] & 0x0FFF_0FFF;
+                fragment[6 + stage] = registers[base + 1] & 0x0077_7FFF;
+                fragment[12 + stage] = registers[base + 2] & 0x000F_000F;
+            }
+            fragment[27] = registers[REG_ALPHA_TEST] & 0x71;
+            let (alpha_first, reads_lighting) = hardware::fragment_shortcuts(&fragment);
+            assert!(if case % 2 == 0 { alpha_first } else { !reads_lighting }, "case {case} misses its shortcut");
+            let texels: Vec<u8> = (0..0x300).map(|_| random.next() as u8).collect();
+            let triangles: Vec<Vec<Vertex>> = (0..4)
+                .map(|_| {
+                    (0..3)
+                        .map(|_| {
+                            let mut float = || (random.next() % 2000) as f32 / 1000.0 - 1.0;
+                            let w = 1.5 + float();
+                            Vertex {
+                                clip: [float() * w, float() * w, (float() * 0.5 - 0.5) * w, w],
+                                color: [float().abs(), float().abs(), float().abs(), float().abs()],
+                                texcoords: [[float() * 2.0, float() * 2.0], [float() * 2.0, float() * 2.0], [float() * 2.0, float() * 2.0]],
+                                quaternion: [float(), float(), float(), float()],
+                                view: [float(), float(), float()],
+                                texcoord0_w: 1.0,
+                            }
+                        })
+                        .collect()
+                })
+                .collect();
+            let mut results = Vec::new();
+            for resources in [&mut generics, &mut specializeds] {
+                let mut memory = ConsoleMemory::default();
+                memory.write(COLOR, &vec![0u8; bytes]);
+                memory.write(DEPTH, &vec![0xFFu8; bytes]);
+                memory.write(TEXTURES, &texels);
+                for triangle in &triangles {
+                    rasterize_shaded(&registers, &mut memory, resources, triangle);
+                }
+                resources.hardware.as_mut().unwrap().flush(&mut memory).unwrap();
+                let mut out = vec![0u8; bytes * 2];
+                memory.read(COLOR, &mut out[..bytes]);
+                memory.read(DEPTH, &mut out[bytes..]);
+                results.push(out);
+            }
+            drawn += results[0][..bytes].iter().any(|&b| b != 0) as u32;
+            if results[0] != results[1] {
+                differing.push(case);
+            }
+            dump.extend_from_slice(&results[1]);
+        }
+        // ZAKURO_DUMP_SHORTCUTS=<file> keeps the specialized results, to compare builds of the shader
+        if let Some(path) = std::env::var_os("ZAKURO_DUMP_SHORTCUTS") {
+            std::fs::write(path, &dump).unwrap();
+            eprintln!("differing cases: {differing:?}");
+            return;
+        }
+        // case 183 differs from the generic shader with the shaders from before the shortcuts
+        // too (Awakening-Port B06), and the specialized output is the same either way
+        assert_eq!(differing, [183], "cases differing from the generic shader");
+        assert!(early > 100 && unlit > 100 && drawn > 120, "{early} alpha-first, {unlit} unlit, {drawn} drew something");
+    }
+
+    /// random fragment lighting set up in the registers: lights with colors, positions,
+    /// spot directions, distance attenuation and flags, any count of them, any lookup
+    /// configuration, inputs, abs and scales, bump and shadow from the textures, and random
+    /// lookup tables.
+    #[cfg(feature = "vulkan")]
+    fn random_lighting(random: &mut Random, registers: &mut [u32], tables: &mut crate::lighting::Tables) {
+        use crate::lighting::*;
+        registers[REG_ENABLE] = 1;
+        registers[REG_DISABLE] = 0;
+        // a half float (10-bit mantissa, 5-bit exponent) between about 1/32 and 16
+        let half = |random: &mut Random| (random.next() & 0x83FF) | ((10 + random.next() % 10) << 10);
+        for light in 0..8 {
+            let block = REG_LIGHTS + light * 0x10;
+            for color in 0..4 {
+                registers[block + color] = random.next() & 0x3FFF_FFFF;
+            }
+            registers[block + 4] = half(random) | half(random) << 16;
+            registers[block + 5] = half(random);
+            registers[block + 6] = random.next() & 0x1FFF_1FFF;
+            registers[block + 7] = random.next() & 0x1FFF;
+            registers[block + 9] = random.next() & 0xF;
+            // distance bias and scale, 12-bit mantissas with exponents near 1
+            let near_one = |random: &mut Random| (random.next() & 0x8_0FFF) | ((60 + random.next() % 6) << 12);
+            registers[block + 10] = near_one(random);
+            registers[block + 11] = near_one(random);
+        }
+        registers[REG_GLOBAL_AMBIENT] = random.next() & 0x3FFF_FFFF;
+        registers[REG_LIGHT_COUNT] = random.next() & 7;
+        let config = [0, 1, 2, 3, 4, 5, 6, 8][(random.next() % 8) as usize];
+        let shadow = (random.next() % 4 == 0) as u32;
+        registers[REG_CONFIG0] = shadow
+            | (random.next() & 0xC)
+            | config << 4
+            | (random.next() & 0xF_0000)
+            | (random.next() & 0xF << 22)
+            | (random.next() & 1) << 27
+            | (random.next() % 3) << 28
+            | (random.next() & 1) << 30;
+        registers[REG_CONFIG1] = random.next();
+        registers[REG_TABLE_ABSOLUTE] = random.next();
+        registers[REG_TABLE_INPUT] = random.next();
+        registers[REG_TABLE_SCALE] = random.next();
+        registers[REG_LIGHT_SLOTS] = random.next();
+        let mut index = vec![0u32; REG_TABLE_INDEX + 1];
+        for table in 0..TABLES as u32 {
+            index[REG_TABLE_INDEX] = table << 8;
+            let entries: Vec<u32> = (0..256).map(|_| random.next() & 0xFF_FFFF).collect();
+            tables.write_all(&mut index, [&entries, &[]]);
+        }
+    }
+
+    /// B05: lit draws, with lighting read by the combiners, draw the same with the
+    /// specialized shader as with the generic one, over random lighting set-ups.
+    /// ZAKURO_DUMP_LIGHTING=<file> keeps the specialized then the generic results, to compare
+    /// builds of the shader byte for byte.
+    #[cfg(feature = "vulkan")]
+    #[test]
+    fn lit_draws_specialized_like_the_generic_shader() {
+        let (Ok(mut generic), Ok(specialized)) = (hardware::Hardware::new(), hardware::Hardware::new()) else {
+            return;
+        };
+        generic.set_generic(true);
+        const TEXTURES: u32 = 0x8_0000;
+        const STAGES: [usize; 6] = [0x0C0, 0x0C8, 0x0D0, 0x0D8, 0x0F0, 0x0F8];
+        let mut random = Random(91);
+        let mut generics = Resources { hardware: Some(generic), ..Default::default() };
+        let mut specializeds = Resources { hardware: Some(specialized), ..Default::default() };
+        let bytes = (TRANSLATION_SIZE * TRANSLATION_SIZE * 4) as usize;
+        let (mut drawn, mut differing, mut dump) = (0, Vec::new(), [Vec::new(), Vec::new()]);
+        for case in 0..200 {
+            let mut registers = translation_registers();
+            random_fragment_stages(&mut random, &mut registers, TEXTURES);
+            // a third of the inputs read the primary or the secondary fragment color
+            for base in STAGES {
+                for shift in [0, 4, 8, 16, 20, 24] {
+                    if random.next() % 3 == 0 {
+                        registers[base] = registers[base] & !(0xF << shift) | (1 + random.next() % 2) << shift;
+                    }
+                }
+            }
+            let mut tables = crate::lighting::Tables::default();
+            random_lighting(&mut random, &mut registers, &mut tables);
+            let texels: Vec<u8> = (0..0x300).map(|_| random.next() as u8).collect();
+            let triangles: Vec<Vec<Vertex>> = (0..4)
+                .map(|_| {
+                    (0..3)
+                        .map(|_| {
+                            let mut float = || (random.next() % 2000) as f32 / 1000.0 - 1.0;
+                            let w = 1.5 + float();
+                            Vertex {
+                                clip: [float() * w, float() * w, (float() * 0.5 - 0.5) * w, w],
+                                color: [float().abs(), float().abs(), float().abs(), float().abs()],
+                                texcoords: [[float() * 2.0, float() * 2.0], [float() * 2.0, float() * 2.0], [float() * 2.0, float() * 2.0]],
+                                quaternion: [float(), float(), float(), float()],
+                                view: [float() * 4.0, float() * 4.0, float() * 4.0],
+                                texcoord0_w: 1.0,
+                            }
+                        })
+                        .collect()
+                })
+                .collect();
+            let mut results = Vec::new();
+            for resources in [&mut generics, &mut specializeds] {
+                resources.light_tables.restore(&tables.saved());
+                let mut memory = ConsoleMemory::default();
+                memory.write(COLOR, &vec![0u8; bytes]);
+                memory.write(DEPTH, &vec![0xFFu8; bytes]);
+                memory.write(TEXTURES, &texels);
+                for triangle in &triangles {
+                    rasterize_shaded(&registers, &mut memory, resources, triangle);
+                }
+                resources.hardware.as_mut().unwrap().flush(&mut memory).unwrap();
+                let mut out = vec![0u8; bytes];
+                memory.read(COLOR, &mut out);
+                results.push(out);
+            }
+            drawn += results[0].iter().any(|&b| b != 0) as u32;
+            if results[0] != results[1] {
+                differing.push(case);
+            }
+            dump[0].extend_from_slice(&results[1]);
+            dump[1].extend_from_slice(&results[0]);
+        }
+        if let Some(path) = std::env::var_os("ZAKURO_DUMP_LIGHTING") {
+            std::fs::write(path, dump.concat()).unwrap();
+            eprintln!("lit cases differing from the generic shader: {differing:?}, {drawn} drew something");
+            return;
+        }
+        // case 104 differs from the generic shader with the shaders from before the lighting
+        // shape too (Awakening-Port B06), and the specialized output is the same either way
+        assert_eq!(differing, [104], "lit cases differing from the generic shader");
+        assert!(drawn > 140, "{drawn} drew something");
+    }
+
     /// the generic fragment shader, which draws while the one made for a
     /// combination compiles, draws what that one draws, to the bit, over
     /// random fragment stages, with the triangles placed by the CPU and with
@@ -6391,24 +7124,62 @@ mod tests {
         }
     }
 
-    /// the triangles the GPU takes are the ones assemble_into puts down, for
-    /// raw arrays as they number the vertices, a list's going as they are,
-    /// for vertices in an order and for vertices in a row.
+    /// the triangles the GPU takes are the ones assemble_into puts down, the
+    /// same three vertices wound the same way, for lists and strips of raw
+    /// arrays as Vulkan puts them together from the guest's indices or
+    /// from vertices in a row, and as they are for fans, vertices in an
+    /// order and vertices in a row.
     #[cfg(feature = "vulkan")]
     #[test]
     fn the_gpu_takes_the_triangles_the_assembler_makes() {
+        use hardware::{Primitives, RawOrder};
+        // as Vulkan takes them, a strip's triangle k the vertices k,
+        // k + 1 + k % 2 and k + 2 - k % 2
+        fn taken(primitives: Primitives) -> Vec<[u32; 3]> {
+            let Primitives::Raw { strip, order } = primitives else {
+                let Primitives::Triangles(indices) = primitives else { unreachable!() };
+                return indices.as_chunks::<3>().0.to_vec();
+            };
+            let vertex = |i: usize| match order {
+                RawOrder::InARow(_) => i as u32,
+                RawOrder::Indexed { bytes, short: true, first } => u16::from_le_bytes([bytes[2 * i], bytes[2 * i + 1]]) as u32 - first,
+                RawOrder::Indexed { bytes, short: false, first } => bytes[i] as u32 - first,
+            };
+            match strip {
+                true => (0..order.len().saturating_sub(2)).map(|k| [vertex(k), vertex(k + 1 + k % 2), vertex(k + 2 - k % 2)]).collect(),
+                false => (0..order.len() / 3).map(|t| [vertex(3 * t), vertex(3 * t + 1), vertex(3 * t + 2)]).collect(),
+            }
+        }
+        let turned = |[a, b, c]: [u32; 3]| [[a, b, c], [b, c, a], [c, a, b]];
         for topology in 0..4 {
             for count in 0..14 {
-                let raw: Vec<u32> = (0..count as u32).map(|i| 1000 + i * 7 % 5).collect();
+                let relative: Vec<u32> = (0..count as u32).map(|i| i * 7 % 5).collect();
+                let halves: Vec<u8> = relative.iter().flat_map(|&i| (1000 + i as u16).to_le_bytes()).collect();
+                let bytes: Vec<u8> = relative.iter().map(|&i| 100 + i as u8).collect();
                 let order: Vec<usize> = (0..count).map(|i| (i * 3) % 4).collect();
-                let mut assembled = vec![99];
-                let mut expected = Vec::new();
-                assemble_into(topology, count, |i| raw[i], &mut expected);
-                assert_eq!(triangle_indices(topology, count, Some(&raw), None, &mut assembled), expected, "raw, topology {topology}, {count} vertices");
-                assemble_into(topology, count, |i| order[i] as u32, &mut expected);
-                assert_eq!(triangle_indices(topology, count, None, Some(&order), &mut assembled), expected, "ordered, topology {topology}, {count} vertices");
-                assemble_into(topology, count, |i| i as u32, &mut expected);
-                assert_eq!(triangle_indices(topology, count, None, None, &mut assembled), expected, "in a row, topology {topology}, {count} vertices");
+                let cases = [
+                    ("halfwords", Some(RawOrder::Indexed { bytes: &halves, short: true, first: 1000 }), None, &relative),
+                    ("bytes", Some(RawOrder::Indexed { bytes: &bytes, short: false, first: 100 }), None, &relative),
+                    ("raw in a row", Some(RawOrder::InARow(count)), None, &(0..count as u32).collect()),
+                    ("ordered", None, Some(&order[..]), &order.iter().map(|&i| i as u32).collect()),
+                    ("in a row", None, None, &(0..count as u32).collect()),
+                ];
+                for (name, raw, order, vertices) in cases {
+                    let mut expected = Vec::new();
+                    assemble_into(topology, count, |i| vertices[i], &mut expected);
+                    let mut assembled = vec![99];
+                    let primitives = primitives(topology, count, raw, order, &mut assembled);
+                    let triangles = taken(primitives);
+                    let what = format!("{name}, topology {topology}, {count} vertices");
+                    assert_eq!(primitives.triangles(), expected.len() / 3, "{what}");
+                    assert_eq!(triangles.len(), expected.len() / 3, "{what}");
+                    for (&triangle, &wanted) in triangles.iter().zip(expected.as_chunks::<3>().0) {
+                        assert!(turned(triangle).contains(&wanted), "{what}, {triangle:?} for {wanted:?}");
+                    }
+                    // raw lists and strips go as the guest has them
+                    let raw_kept = raw.is_some() && topology != 2;
+                    assert_eq!(matches!(primitives, Primitives::Raw { .. }), raw_kept, "{what}");
+                }
             }
         }
     }

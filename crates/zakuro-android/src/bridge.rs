@@ -254,6 +254,38 @@ pub extern "system" fn Java_io_github_zakuro_android_Game_nativeSecondTouch(
     }
 }
 
+/// The time between the game's last pictures, in microseconds, for the performance overlay. Written by
+/// the emulation thread once per game picture; read by the overlay's view a few times a second.
+pub const FRAME_RING: usize = 256;
+static FRAME_US: [std::sync::atomic::AtomicU32; FRAME_RING] =
+    [const { std::sync::atomic::AtomicU32::new(0) }; FRAME_RING];
+static FRAMES_RECORDED: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(0);
+pub fn record_frame(time: std::time::Duration) {
+    use std::sync::atomic::Ordering;
+    let n = FRAMES_RECORDED.load(Ordering::Relaxed);
+    let us = u32::try_from(time.as_micros()).unwrap_or(u32::MAX);
+    FRAME_US[n as usize % FRAME_RING].store(us, Ordering::Relaxed);
+    FRAMES_RECORDED.store(n.wrapping_add(1), Ordering::Release);
+}
+/// Copies the ring into `out` (at most FRAME_RING ints) and returns how many pictures were recorded so
+/// far: entry `n % FRAME_RING` holds picture `n`.
+#[no_mangle]
+pub extern "system" fn Java_io_github_zakuro_android_Game_nativeFrameTimes(
+    env: JNIEnv<'_>,
+    _: JObject<'_>,
+    out: jni::objects::JIntArray<'_>,
+) -> jint {
+    use std::sync::atomic::Ordering;
+    let n = FRAMES_RECORDED.load(Ordering::Acquire);
+    let ring: Vec<i32> = FRAME_US
+        .iter()
+        .map(|t| t.load(Ordering::Relaxed).min(i32::MAX as u32) as i32)
+        .collect();
+    let len = env.get_array_length(&out).unwrap_or(0).clamp(0, FRAME_RING as i32) as usize;
+    let _ = env.set_int_array_region(&out, 0, &ring[..len]);
+    n as jint
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

@@ -19,6 +19,12 @@ final class Palette {
 
     Palette(Context c) {
         context = c;
+        if (Exalt.is(c)) { // ExaltDS: always dark, Chrom's navy with the Exalt's gold
+            dark = true;
+            background = 0xff0b1022; surface = 0xff131b36; raised = 0xff1a2446; ink = 0xfff3f5fb; muted = 0xffafb9d6;
+            accent = 0xffe2b455; onAccent = 0xff1a1405; soft = 0xff3a3420; border = 0xff2c3966; ring = 0xfff5d58c; danger = 0xffff8a94;
+            return;
+        }
         dark = (c.getResources().getConfiguration().uiMode & Configuration.UI_MODE_NIGHT_MASK) == Configuration.UI_MODE_NIGHT_YES;
         background = dark ? 0xff15100d : 0xfff6efe9; surface = dark ? 0xff211915 : 0xfffffaf6; raised = dark ? 0xff2d221c : 0xffffffff;
         ink = dark ? 0xfff7efe9 : 0xff2b1d15; muted = dark ? 0xffc9b6a8 : 0xff6a5446; accent = dark ? 0xfffb7a05 : 0xffb84400;

@@ -9,7 +9,7 @@ import java.util.*;
 /** Inspect exported ABI data without loading or executing untrusted native code. */
 final class NativeLibrary {
     /** recomp_abi::ABI of the pinned 3dsrecomp, and OLDEST_ABI, the oldest code it still runs. */
-    static final int ABI = 5, OLDEST_ABI = 4;
+    static final int ABI = 8, OLDEST_ABI = 4;
     /** recomp_abi::GENERATION of the pinned 3dsrecomp; older libraries run but are slower (recompiled.rs: outdated). */
     static final int GENERATION = 5;
     /** size_of::<Entry>() and size_of::<Module>() on AArch64 (abi/src/lib.rs at 73b8f9c, repr(C)). */

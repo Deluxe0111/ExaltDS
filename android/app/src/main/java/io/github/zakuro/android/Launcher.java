@@ -345,7 +345,7 @@ public final class Launcher extends Activity {
         String body = "1. Choose one game's Android build folder. It needs the original decrypted game and its Android ARM64 title.so.\n\n"
                 + "2. Texture packs are optional. Leave Include texture pack off to add just the game. You can attach a pack later from the game's Settings.\n\n"
                 + "3. Add the folder, then select Play. Reimporting keeps this app's saves.\n\n"
-                + "Native game code must be built for Zakuroishi Android ABI 5 (ABI 4 code still runs; rebuilding it runs faster). If an older build cannot start, open its Settings and choose Replace native game code. Select the rebuilt title.so; this keeps the ROM, textures and saves. See the project's Android build documentation for building compatible code.\n\n"
+                + "Native game code must be built for Zakuroishi Android ABI 8 (ABI 4 to 7 code still runs; rebuilding it runs faster). If an older build cannot start, open its Settings and choose Replace native game code. Select the rebuilt title.so; this keeps the ROM, textures and saves. See the project's Android build documentation for building compatible code.\n\n"
                 + "Only add builds you trust: native game code can access this app's files and saves.\n\n"
                 + "Use the D-pad to move and your controller's confirm button to select. Hold the handheld still briefly after a game resumes to calibrate motion.\n\n"
                 + "Native library interface documentation:\nhttps://github.com/fearkov/3dsrecomp/blob/73b8f9caf3700991c290dd84bccffb92294d6b15/docs/interface.md";
@@ -372,7 +372,7 @@ public final class Launcher extends Activity {
         ids.sort((a, b) -> names.get(a).compareToIgnoreCase(names.get(b)));
     }
     private String summary(String id, boolean second) {
-        String summary = Math.max(1, Math.min(3, settings().getInt(id + ".resolution", 1))) + "× resolution";
+        String summary = Math.max(1, Math.min(4, settings().getInt(id + ".resolution", 1))) + "× resolution";
         try { if (new File(GameImport.active(this, id), "data/mods/" + id + "/textures").isDirectory()) summary += settings().getBoolean(id + ".textures", true) ? "  ·  HD textures on" : "  ·  HD textures off";
             else summary += "  ·  Original textures";
         } catch (Exception e) { return "Files unavailable. Add this game again to repair it."; }
@@ -461,7 +461,7 @@ public final class Launcher extends Activity {
             controllerDialog(new AlertDialog.Builder(this, p.dialogTheme()).setTitle(title).setMessage(error).setPositiveButton("OK", null).create()).show(); }
     }
     /** Returns the text for the success dialog: the driver library's SHA-256. */
-    private static String installDriver(Context context, String id, Uri uri) throws Exception {
+    static String installDriver(Context context, String id, Uri uri) throws Exception {
         String report = null;
         File home = new File(context.getFilesDir(),"drivers");
         if (!home.isDirectory() && !home.mkdirs()) throw new java.io.IOException("Cannot create driver storage");

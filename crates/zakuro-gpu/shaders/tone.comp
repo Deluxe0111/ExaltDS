@@ -1,0 +1,36 @@
+#version 450
+
+// a title's 3D scene brightened in place of the glow it left out, before its 2D goes over
+// it. the glow added a blurred copy of the scene to itself; the scene screened over itself,
+// 1 - (1 - c)^2, lifts the dark and middle tones about as much, twice near black, leaves
+// white white and spreads no light past an edge. then a gain and a contrast about middle
+// grey, and the colours pushed away from grey, for the glow's bright, dreamy look. the
+// image holds the scene scaled.
+//   glslc tone.comp -o tone.comp.spv
+layout(local_size_x = 8, local_size_y = 8) in;
+
+layout(set = 0, binding = 0, rgba8) uniform image2D picture;
+
+layout(push_constant) uniform Tone {
+    // the pixels changed, from the image's bottom row
+    ivec2 size;
+    // how much of the lift, 0 to 1, then the gain, the contrast and the saturation, 1
+    // leaving each as it is
+    float lift;
+    float gain;
+    float contrast;
+    float saturation;
+} tone;
+
+void main() {
+    ivec2 at = ivec2(gl_GlobalInvocationID.xy);
+    if (at.x >= tone.size.x || at.y >= tone.size.y) {
+        return;
+    }
+    vec4 c = imageLoad(picture, at);
+    vec3 rgb = mix(c.rgb, 1.0 - (1.0 - c.rgb) * (1.0 - c.rgb), tone.lift);
+    rgb = (rgb * tone.gain - 0.5) * tone.contrast + 0.5;
+    float luma = dot(rgb, vec3(0.299, 0.587, 0.114));
+    rgb = clamp(mix(vec3(luma), rgb, tone.saturation), 0.0, 1.0);
+    imageStore(picture, at, vec4(rgb, c.a));
+}

@@ -175,7 +175,7 @@ final class SettingsDialog {
             }
             if (repair != null) {
                 Button replace = button("Replace native game code…"); replace.setOnClickListener(v -> repair.run()); addButton(content, replace);
-                content.addView(text("Choose a trusted Android ABI 5 title.so (ABI 4 still runs). The ROM, textures and saves stay in place.", true));
+                content.addView(text("Choose a trusted Android ABI 8 title.so (ABI 4 to 7 still run). The ROM, textures and saves stay in place.", true));
             }
         }
         if (!inGame && activity instanceof Launcher) {
@@ -256,7 +256,7 @@ final class SettingsDialog {
         if (group.equals("Display")) {
             content.addView(heading("Picture quality"));
             Button resolution = button("Rendering resolution · " + draft.resolution + "×");
-            resolution.setOnClickListener(v -> numbers(draft, resolution, null, "Rendering resolution", new float[]{1, 2, 3}, new String[]{"1× · Best performance", "2× · Sharper picture", "3× · Highest detail"}));
+            resolution.setOnClickListener(v -> numbers(draft, resolution, null, "Rendering resolution", new float[]{1, 2, 3, 4}, new String[]{"1× · Best performance", "2× · Sharper picture", "3× · Highest detail", "4× · Highest detail, most GPU load"}));
             addButton(content, resolution);
             boolean pack = GameSettings.hasTextures(version, settings.id);
             Switch use = toggle("HD texture pack (optional)", pack && draft.textures);
@@ -289,7 +289,7 @@ final class SettingsDialog {
                 content.addView(heading(section));
             }
             control(content, draft, setting);
-            if (setting.key.equals("frame_generation_flow")) {
+            if (setting.key.equals("frame_generation_flow") && activity instanceof Launcher) {
                 Button lossless = button("Import your Lossless.dll…");
                 lossless.setOnClickListener(v -> ((Launcher) activity).importLossless()); addButton(content, lossless);
                 TextView state = text(losslessState(), true); content.addView(state);

@@ -32,6 +32,22 @@ const STEREO_CONSTANTS: u32 = 80;
 /// how many frames may be recorded before waiting on the oldest.
 const FRAMES_IN_FLIGHT: usize = 2;
 
+/// where presents spend the host's time, for the benchmark line: nanoseconds waiting for the
+/// frame's fence, in acquire, in queue submit and in queue present, then how many presents.
+pub static PRESENT_NS: [std::sync::atomic::AtomicU64; 5] = [const { std::sync::atomic::AtomicU64::new(0) }; 5];
+
+/// the present timings since the last call, in ms per present, and how many presents.
+pub fn take_present_stats() -> ([f64; 4], u64) {
+    use std::sync::atomic::Ordering::Relaxed;
+    let count = PRESENT_NS[4].swap(0, Relaxed);
+    let per = |i: usize| PRESENT_NS[i].swap(0, Relaxed) as f64 / 1e6 / count.max(1) as f64;
+    ([per(0), per(1), per(2), per(3)], count)
+}
+
+fn note_present(part: usize, since: std::time::Instant) {
+    PRESENT_NS[part].fetch_add(since.elapsed().as_nanos() as u64, std::sync::atomic::Ordering::Relaxed);
+}
+
 fn presentation_transform(capabilities: &vk::SurfaceCapabilitiesKHR) -> vk::SurfaceTransformFlagsKHR {
     // We draw in window coordinates, so the compositor must handle panel rotation.
     // shortcut: this can cost a composition pass; use pre-rotation only with matching geometry.
@@ -156,6 +172,8 @@ pub struct VulkanPresenter {
     /// under FIFO, the fewest images the surface allows rather than one more, so fewer
     /// finished frames wait for the display.
     short_queue: bool,
+    /// swapchain images beyond the usual count (development switch).
+    extra_images: u32,
     /// the transform differs from the panel's on purpose (see presentation_transform),
     /// which Android reports as suboptimal on every present: that alone is no reason to rebuild.
     rotated: bool,
@@ -210,6 +228,28 @@ impl VulkanPresenter {
         size: (u32, u32),
         entry: ash::Entry,
     ) -> Result<VulkanPresenter, PresentError> {
+        Self::make(window, size, entry, None)
+    }
+
+    /// A presenter for another window on the device (and instance) another
+    /// presenter already shares with the renderer, so it shows the renderer's
+    /// images straight from the GPU too, rather than copies read back to the
+    /// host. Fails when that device's queue family cannot present to this window.
+    pub fn with_shared(
+        window: &(impl HasDisplayHandle + HasWindowHandle),
+        size: (u32, u32),
+        shared: Arc<SharedDevice>,
+    ) -> Result<VulkanPresenter, PresentError> {
+        let entry = shared._entry.clone();
+        Self::make(window, size, entry, Some(shared))
+    }
+
+    fn make(
+        window: &(impl HasDisplayHandle + HasWindowHandle),
+        size: (u32, u32),
+        entry: ash::Entry,
+        joining: Option<Arc<SharedDevice>>,
+    ) -> Result<VulkanPresenter, PresentError> {
         let display = window
             .display_handle()
             .map_err(|e| fail(format!("no display handle: {e}")))?;
@@ -228,8 +268,11 @@ impl VulkanPresenter {
             .map_err(vk_fail("querying surface extensions"))?
             .to_vec();
 
-        let instance = crate::instance::new(&entry, &application, &extensions)
-            .map_err(vk_fail("creating the instance"))?;
+        let instance = match &joining {
+            Some(shared) => shared.instance.clone(),
+            None => crate::instance::new(&entry, &application, &extensions)
+                .map_err(vk_fail("creating the instance"))?,
+        };
 
         let surface_instance = ash::khr::surface::Instance::new(&entry, &instance);
         let surface = unsafe {
@@ -243,8 +286,22 @@ impl VulkanPresenter {
         }
         .map_err(vk_fail("creating the surface"))?;
 
-        let (physical_device, queue_family) =
-            pick_device(&instance, &surface_instance, surface)?;
+        let (physical_device, queue_family) = match &joining {
+            Some(shared) => {
+                // SAFETY: the surface was just made on this instance
+                let supported = unsafe {
+                    surface_instance.get_physical_device_surface_support(shared.physical, shared.family, surface)
+                }
+                .unwrap_or(false);
+                if !supported {
+                    // SAFETY: nothing was made from the surface yet
+                    unsafe { surface_instance.destroy_surface(surface, None) };
+                    return Err(fail("the renderer's queue cannot present to this window".to_owned()));
+                }
+                (shared.physical, shared.family)
+            }
+            None => pick_device(&instance, &surface_instance, surface)?,
+        };
 
         let properties = unsafe { instance.get_physical_device_properties(physical_device) };
         let name = unsafe { CStr::from_ptr(properties.device_name.as_ptr()) };
@@ -257,7 +314,9 @@ impl VulkanPresenter {
         // again, ZAKURO_COPY_SCREENS keeps the copies
         let copy = std::env::var_os("ZAKURO_COPY_SCREENS").is_some();
         let swapchain_extension = [ash::khr::swapchain::NAME.as_ptr()];
-        let shared = if copy || !can_render(&instance, physical_device, queue_family) {
+        let shared = if joining.is_some() {
+            joining
+        } else if copy || !can_render(&instance, physical_device, queue_family) {
             None
         } else {
             render_device(&entry, &instance, physical_device, queue_family, &swapchain_extension)
@@ -468,6 +527,7 @@ impl VulkanPresenter {
             waits: true,
             vsync: false,
             short_queue: false,
+            extra_images: 0,
             rotated: false,
             command_pool,
             command_buffers,
@@ -526,7 +586,7 @@ impl VulkanPresenter {
             return Ok(());
         }
 
-        let mut image_count = capabilities.min_image_count + u32::from(!(self.vsync && self.short_queue));
+        let mut image_count = capabilities.min_image_count + u32::from(!(self.vsync && self.short_queue)) + self.extra_images;
         if capabilities.max_image_count > 0 && image_count > capabilities.max_image_count {
             image_count = capabilities.max_image_count;
         }
@@ -749,6 +809,22 @@ impl VulkanPresenter {
     pub fn set_short_queue(&mut self, short: bool) {
         if self.short_queue != short {
             self.short_queue = short;
+            self.stale = true;
+        }
+    }
+
+    /// whether the GPU has not yet finished the last frame presented, and with it everything the
+    /// renderer handed over before it: a GPU that is behind.
+    pub fn behind(&self) -> bool {
+        let last = self.in_flight[(self.frame + FRAMES_IN_FLIGHT - 1) % FRAMES_IN_FLIGHT];
+        // SAFETY: a fence of ours, created signalled and only reset right before its submit
+        !unsafe { self.device.get_fence_status(last) }.unwrap_or(true)
+    }
+
+    /// swapchain images beyond the usual count; a change rebuilds the swapchain like set_vsync.
+    pub fn set_extra_images(&mut self, extra: u32) {
+        if self.extra_images != extra {
+            self.extra_images = extra;
             self.stale = true;
         }
     }
@@ -1050,12 +1126,15 @@ impl VulkanPresenter {
 
         let frame = self.frame;
         let fence = self.in_flight[frame];
+        let start = std::time::Instant::now();
         unsafe {
             self.device
                 .wait_for_fences(&[fence], true, u64::MAX)
                 .map_err(vk_fail("waiting for a fence"))?;
         }
+        note_present(0, start);
 
+        let start = std::time::Instant::now();
         let acquired = unsafe {
             self.swapchain_device.acquire_next_image(
                 self.swapchain,
@@ -1064,6 +1143,7 @@ impl VulkanPresenter {
                 vk::Fence::null(),
             )
         };
+        note_present(1, start);
         let (image_index, suboptimal) = match acquired {
             Ok(result) => result,
             Err(vk::Result::ERROR_OUT_OF_DATE_KHR) => {
@@ -1124,11 +1204,13 @@ impl VulkanPresenter {
             .wait_dst_stage_mask(&stages)
             .command_buffers(&buffers)
             .signal_semaphores(&signal);
+        let start = std::time::Instant::now();
         unsafe {
             self.device
                 .queue_submit(self.queue, &[submit], fence)
                 .map_err(vk_fail("submitting"))?;
         }
+        note_present(2, start);
 
         let swapchains = [self.swapchain];
         let indices = [image_index];
@@ -1136,7 +1218,10 @@ impl VulkanPresenter {
             .wait_semaphores(&signal)
             .swapchains(&swapchains)
             .image_indices(&indices);
+        let start = std::time::Instant::now();
         let result = unsafe { self.swapchain_device.queue_present(self.queue, &present) };
+        note_present(3, start);
+        PRESENT_NS[4].fetch_add(1, std::sync::atomic::Ordering::Relaxed);
 
         self.frame = (self.frame + 1) % FRAMES_IN_FLIGHT;
 

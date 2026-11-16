@@ -85,3 +85,95 @@ D2000000 00000000
 = 00040000001B2900 Yo-kai Watch 2: Psychic Specters (EUR)
 60 FPS | rev0 | lucky | Some things may run faster with it.
 2086128D 00000001
+
+= 00040000000A0500 Fire Emblem: Awakening (USA)
+16:9 | rev0 | fe-awakening-recomp, relocated by Awakening-Port | Draws the top screen's 3D wider for 16:9: set the top screen shape to 16:9 too. The game's camera projection builder makes every top-screen camera's 5:3 aspect 16/15 as wide, the map camera's own 5:3 becomes 16:9, and the glow pass covers the wider picture. The 2D on the top screen, menus and text boxes, is stretched a little. Fire Emblem Awakening recomp's EUR code (Zelkin1/fe-awakening-recomp 9c9543b), its addresses found again in the USA executable (Awakening-Port tools/relocate-16x9.py)
+002FDCAC EB056FD3
+00459C00 EE18CA90
+00459C04 E59F001C
+00459C08 E04CC000
+00459C0C E59F0018
+00459C10 E15C0000
+00459C14 EEB02A68
+00459C18 9DDF2A04
+00459C1C 9E282AA2
+00459C20 EE801A02
+00459C24 E12FFF1E
+00459C28 3FCCCCCD
+00459C2C 00133333
+00459C30 3F888889
+003D4DFC 3FE38E39
+002E9FAC EB05BF31
+00459C78 E59DC03C
+00459C7C E24CC818
+00459C80 E24CCA0D
+00459C84 E35C0B02
+00459C88 33A0C000
+00459C8C 358DC008
+00459C90 358DC00C
+00459C94 EAFABB78
+002D13AC EB062239
+00459C98 E5941004
+00459C9C E1D113D0
+00459CA0 E58DE010
+00459CA4 E59DC00C
+00459CA8 E35C0C02
+00459CAC 1A000008
+00459CB0 E3A0CE18
+00459CB4 E58DC004
+00459CB8 E3A0C010
+00459CBC E58DC00C
+00459CC0 E2611000
+00459CC4 E1A00005
+00459CC8 E3A02000
+00459CCC E3A03E19
+00459CD0 EBFA40B9
+00459CD4 E59DE010
+00459CD8 E28DD014
+00459CDC E12FFF1E
+No glow | rev0 | Awakening-Port | Leaves out the glow the game lays over the top screen's 3D, a haze meant for the console's small screen that halos the characters and grass in a picture drawn at several times its size. The game's glow pass copies the scene as it would and then stops, which spares the GPU the blurs and the layers drawn back over the scene. The glow also brightened the scene about twice over; where the pass stops, after the 3D and before the 2D, the GPU brightens and saturates the 3D instead, by a curve that lifts it as much without spreading light around anything, so the portraits and text boxes stay as they are
+0018D3F4 EA000164
+Combat 30 baseline test | rev0 | Awakening-Port | TEMP M3: puts back the game's own requests for 2 vblanks a frame (30 fps) where a save state still holds an older test's patch
+0015B334 E3A00002
+001ACF74 E3A00002
+002FB768 E3A00002
+Combat 60 fps (faster) | rev0 | Awakening-Port | The main loop (0x100258) no longer waits out the minimum vblanks a frame a scene asks for (combat asks for 2, 30 fps), and the vblank delta is clamped from 1 (0x1008C4) not from that minimum. Combat runs at 60 fps and twice as fast. The last three lines put back the game's own requests where a save state holds an older test's patch
+00100258 E3A01000
+001008C4 E3A02001
+0015B334 E3A00002
+001ACF74 E3A00002
+002FB768 E3A00002
+Combat 60 fps (original speed) | rev0 | Awakening-Port | As Combat 60 fps (faster), and the battle time step (0x2FAFAC, and its second entry 0x2FAFB4) is halved while the scene asks for 2 vblanks a frame, so attacks keep their original timing. The fades into and out of combat count frames and still run about 1 s shorter
+00100258 E3A01000
+001008C4 E3A02001
+0015B334 E3A00002
+001ACF74 E3A00002
+002FB768 E3A00002
+002FAFAC E5900010
+002FAFB0 E1A00000
+002FAFB4 E59F1050
+002FAFB8 ED9F0A14
+002FAFBC E5911000
+002FAFC0 E3510000
+002FAFC4 0A000008
+002FAFC8 E5D02008
+002FAFCC E3520000
+002FAFD0 0D910A08
+002FAFD4 E3520001
+002FAFD8 1A000003
+002FAFDC E591202C
+002FAFE0 E3520FFA
+002FAFE4 BD910A09
+002FAFE8 AE300A40
+002FAFEC E59F2020
+002FAFF0 E5922000
+002FAFF4 E3520002
+002FAFF8 0DDF0A06
+002FAFFC 0E200A20
+002FB000 EDD00A01
+002FB004 EE200A80
+002FB008 E12FFF1E
+002FB00C 004D195C
+002FB010 3F800000
+002FB014 004BDEFC
+002FB018 3F000000

@@ -14,8 +14,33 @@ public final class Game extends NativeActivity {
     // Register bridge exports with ART as well as NativeActivity's native loader.
     static { System.loadLibrary("zakuro_android"); }
     // Shared with bridge.rs.
-    private static final int PAUSE=0, SAVE=1, LOAD=2, RESTART=3, RECALIBRATE=4, SWAP=5, RESUME=6, EXIT=7;
+    static final int PAUSE=0, SAVE=1, LOAD=2, RESTART=3, RECALIBRATE=4, SWAP=5, RESUME=6, EXIT=7;
     private native void nativeCommand(int command);
+    private native int nativeFrameTimes(int[] out);
+    void command(int command) { nativeCommand(command); }
+    Palette palette() { return palette; }
+    // ExaltDS: the sidebar replaces the pause grid, and a performance monitor sits in the top-left corner
+    private boolean exalt;
+    private Sidebar sidebar;
+    private PerfOverlay perf;
+    void setPerfLevel(int level) { if (perf != null) perf.setLevel(level); }
+    @Override protected void onActivityResult(int request, int result, android.content.Intent data) {
+        super.onActivityResult(request, result, data);
+        if (sidebar != null) sidebar.result(request, result, data);
+    }
+    /** Starts the game again from its saved settings (the sidebar's Apply and restart). */
+    void relaunch() {
+        String id=getIntent().getStringExtra("game_id");
+        android.content.Intent next=new android.content.Intent(getIntent());
+        try { GameSettings.load(this,id).apply(next,GameImport.active(this,id)); pendingRestart=next; finish(); }
+        catch(Exception e) { showNativeMessage(e.getMessage()); nativeCommand(RESUME); }
+    }
+    void confirmQuit() {
+        confirm(new AlertDialog.Builder(this,palette.dialogTheme()).setTitle("Quit ExaltDS?").setMessage("Unsaved progress is lost. In-game saves and save states are kept.")
+                .setPositiveButton("Quit",(d,w) -> { nativeCommand(EXIT); finishAndRemoveTask(); }).setNegativeButton("Cancel",null)
+                .setOnDismissListener(d -> nativeCommand(RESUME)));
+    }
+    private void menu() { if (exalt && sidebar != null) { if (sidebar.isOpen()) sidebar.close(); else if (!menuOpen && errorDialog==null) sidebar.open(); } else pauseMenu(); }
     private native void nativeButton(int keyCode, boolean pressed);
     private native void nativeStick(int stick, float x, float y);
     private native void nativeTouch(int mask, float x, float y);
@@ -199,7 +224,14 @@ public final class Game extends NativeActivity {
         if (settings.flag("show_pause_button")) panel(menu, android.view.Gravity.TOP | android.view.Gravity.END, true);
         stats = new android.widget.TextView(this); stats.setTextColor(0xffffffff); stats.setBackgroundColor(0x99000000); stats.setTextSize(13); stats.setTypeface(android.graphics.Typeface.MONOSPACE);
         stats.setPadding(dp(6), dp(3), dp(6), dp(3)); stats.setVisibility(android.view.View.GONE);
-        panel(stats, android.view.Gravity.TOP | android.view.Gravity.START, false);
+        // ExaltDS keeps the top-left corner for its performance monitor
+        panel(stats, android.view.Gravity.TOP | (exalt ? android.view.Gravity.END : android.view.Gravity.START), false);
+        if (exalt) {
+            sidebar = new Sidebar(this, id);
+            perf = new PerfOverlay(this, this::nativeFrameTimes);
+            perf.setLevel(Exalt.perfLevel(this));
+            panel(perf, android.view.Gravity.TOP | android.view.Gravity.START, false, -2, -2, dp(6), dp(6));
+        }
         if (settings.flag("touch_controls")) {
             android.widget.LinearLayout controls = new android.widget.LinearLayout(this);
             String[] labels={"L","↑","↓","←","→","Select","Start","Y","X","B","A","R","ZL","ZR","L3","R3"};
@@ -232,14 +264,14 @@ public final class Game extends NativeActivity {
         inputManager.registerInputDeviceListener(inputListener,hud); updateTouchVisibility();
         hud.post(clock);
     }
-    @Override public void onBackPressed() { pauseMenu(); }
+    @Override public void onBackPressed() { menu(); }
     @Override public boolean dispatchKeyEvent(KeyEvent event) {
         if((event.getKeyCode()==KeyEvent.KEYCODE_BACK || event.getKeyCode()==KeyEvent.KEYCODE_BUTTON_MODE) && !menuOpen && errorDialog==null) {
-            if(event.getAction()==KeyEvent.ACTION_UP) pauseMenu(); return true;
+            if(event.getAction()==KeyEvent.ACTION_UP) menu(); return true;
         }
         return super.dispatchKeyEvent(event);
     }
-    public void showPauseMenu() { runOnUiThread(this::pauseMenu); }
+    public void showPauseMenu() { runOnUiThread(this::menu); }
     private void pauseMenu() {
         if(menuOpen || errorDialog!=null || isFinishing()) return;
         menuOpen=true; nativeCommand(PAUSE);
@@ -298,7 +330,7 @@ public final class Game extends NativeActivity {
             case 9: slotMenu(false); break;
         }
     }
-    private void confirmRestart() {
+    void confirmRestart() {
         menuOpen=false;
         confirm(new AlertDialog.Builder(this,palette.dialogTheme()).setTitle("Restart game?").setMessage("Unsaved progress will be lost. Saved states and in-game saves are kept.")
                 // Relaunch from saved settings: a core-only restart would keep this launch's options (e.g. HD textures).
@@ -310,7 +342,7 @@ public final class Game extends NativeActivity {
                 }).setNegativeButton("Cancel",null)
                 .setOnDismissListener(d -> nativeCommand(RESUME)));
     }
-    private void confirmLoad() {
+    void confirmLoad() {
         menuOpen=false;
         confirm(new AlertDialog.Builder(this,palette.dialogTheme()).setTitle("Load quick state?").setMessage("Progress since it was saved is lost.")
                 .setPositiveButton("Load",(d,w) -> nativeCommand(LOAD)).setNegativeButton("Cancel",null)
@@ -321,7 +353,7 @@ public final class Game extends NativeActivity {
         return new java.io.File(getIntent().getStringExtra("data"),"states/"+getIntent().getStringExtra("game_id")+"/"+slot+".state");
     }
     /** Lists slots 1-9 with their save time (load: only filled ones). D-pad moves, A picks, B closes. Overwrite and load ask first. */
-    private void slotMenu(boolean save) {
+    void slotMenu(boolean save) {
         menuOpen=false;
         java.text.DateFormat when=java.text.DateFormat.getDateTimeInstance(java.text.DateFormat.MEDIUM,java.text.DateFormat.SHORT);
         java.util.List<String> rows=new java.util.ArrayList<>(); java.util.List<Integer> slots=new java.util.ArrayList<>(); java.util.List<String> dates=new java.util.ArrayList<>();
@@ -385,7 +417,7 @@ public final class Game extends NativeActivity {
             .setPositiveButton("Switch",(d,w)->{ pendingRestart=next; finish(); })
             .setNegativeButton("Cancel",null).setOnDismissListener(d->nativeCommand(RESUME)));
     }
-    private void openSettings() {
+    void openSettings() {
         menuOpen=false;
         String id=getIntent().getStringExtra("game_id");
         try {
@@ -414,6 +446,7 @@ public final class Game extends NativeActivity {
     private AlertDialog errorDialog;
     @Override public void onCreate(Bundle state) {
         super.onCreate(state);
+        exalt=Exalt.is(this);
         palette=new Palette(this);
         getWindow().addFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON);
         fullscreen();
@@ -429,11 +462,13 @@ public final class Game extends NativeActivity {
             if (isFinishing() || isDestroyed() || errorDialog != null) return;
             runtimeError = message == null || message.trim().isEmpty()
                     ? "The game could not start. Please check the imported build." : message;
+            // ExaltDS starts straight into the game; after a failure its home screen shows instead, to fix the files
+            if (exalt) Exalt.prefs(this).edit().putBoolean("launch_failed", true).commit();
             errorDialog = new AlertDialog.Builder(this, palette.dialogTheme())
                     .setTitle("Game stopped")
                     .setMessage(runtimeError)
                     .setCancelable(false)
-                    .setPositiveButton("Return to library", (dialog, which) -> finish())
+                    .setPositiveButton(exalt ? "Close" : "Return to library", (dialog, which) -> finish())
                     .create();
             errorDialog.setCanceledOnTouchOutside(false);
             errorDialog.setOnKeyListener((dialog, code, event) -> {
@@ -483,6 +518,7 @@ public final class Game extends NativeActivity {
         }
         panels.clear();
         if (pauseDialog != null) pauseDialog.dismiss();
+        if (sidebar != null) sidebar.dismissNow();
         if (errorDialog != null) { errorDialog.dismiss(); errorDialog = null; }
         // NativeActivity unload joins android_main; only then may a new native session start.
         super.onDestroy();

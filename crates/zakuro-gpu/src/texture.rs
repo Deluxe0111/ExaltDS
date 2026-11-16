@@ -160,12 +160,22 @@ fn tile_index(n: usize, width: usize, positions: &[usize; 64]) -> usize {
 }
 
 /// the texels of BYTES-wide formats, texels cut off by short data left clear.
-fn decode_tiles<const BYTES: usize>(data: &[u8], width: u32, height: u32, decode: impl Fn(&[u8]) -> [u8; 4]) -> Vec<[u8; 4]> {
+fn decode_tiles<const BYTES: usize>(data: &[u8], width: u32, height: u32, decode: impl Fn(&[u8]) -> [u8; 4] + Sync) -> Vec<[u8; 4]> {
     let (w, h) = (width as usize, height as usize);
     let mut out = vec![[0u8; 4]; w * h];
     let positions = tile_positions();
-    for (n, b) in data.chunks_exact(BYTES).take(w * h).enumerate() {
-        out[tile_index(n, w, &positions)] = decode(b);
+    // a row of 8x8 tiles is the next w * 8 texels in memory and its own 8 rows of out
+    let tile_row = |row: usize, texels: &mut [[u8; 4]]| {
+        let start = (row * w * 8 * BYTES).min(data.len());
+        for (n, b) in data[start..].chunks_exact(BYTES).take(w * 8).enumerate() {
+            texels[tile_index(n, w, &positions)] = decode(b);
+        }
+    };
+    if w * h >= PARALLEL_DECODE_TEXELS {
+        use rayon::prelude::*;
+        out.par_chunks_mut(w * 8).enumerate().for_each(|(row, texels)| tile_row(row, texels));
+    } else {
+        out.chunks_mut(w * 8).enumerate().for_each(|(row, texels)| tile_row(row, texels));
     }
     out
 }
@@ -283,49 +293,57 @@ pub fn decode_etc1_texture(data: &[u8], format: TextureFormat, width: u32, heigh
     let (w, alpha) = (width as usize, format == TextureFormat::Etc1A4);
     let block_size = if alpha { 16 } else { 8 };
     let mut out = vec![[0u8; 4]; w * height as usize];
-    for (index, block) in data.chunks_exact(block_size).take(w * height as usize / 16).enumerate() {
-        let (tile, sub_block) = (index / 4, index % 4);
-        let x0 = (tile % (w / 8)) * 8 + sub_block % 2 * 4;
-        let y0 = (tile / (w / 8)) * 8 + sub_block / 2 * 4;
-        let (alphas, color) = if alpha { (Some(&block[0..8]), &block[8..16]) } else { (None, &block[0..8]) };
-        let alphas = alphas.map(|a| u64::from_le_bytes(a.try_into().unwrap()));
-        let word = u64::from_le_bytes(color.try_into().unwrap());
-        let (low, high) = ((word & 0xFFFF_FFFF) as u32, (word >> 32) as u32);
-        let bases = etc1_bases(high);
-        let flip = high & 1 != 0;
-        let tables = [((high >> 5) & 0x7) as usize, ((high >> 2) & 0x7) as usize];
-        for x in 0..4u32 {
-            for y in 0..4u32 {
-                let half = usize::from(!if flip { y < 2 } else { x < 2 });
-                let pixel_index = x * 4 + y;
-                let modifier = (((low >> (pixel_index + 16)) & 1) << 1 | ((low >> pixel_index) & 1)) as usize;
-                let delta = ETC1_MODIFIERS[tables[half]][modifier];
-                let base = bases[half];
-                let a = alphas.map_or(0xFF, |a| expand4(((a >> (pixel_index * 4)) & 0xF) as u8));
-                out[(y0 + y as usize) * w + x0 + x as usize] = [
-                    (base[0] as i32 + delta).clamp(0, 255) as u8,
-                    (base[1] as i32 + delta).clamp(0, 255) as u8,
-                    (base[2] as i32 + delta).clamp(0, 255) as u8,
-                    a,
-                ];
+    // a row of 8x8 tiles writes only its own 8 rows of texels, so the rows decode apart; blocks
+    // the data is too short for stay nothing, as sample_texel has it
+    let tile_row = |row: usize, texels: &mut [[u8; 4]]| {
+        for tile_x in 0..w / 8 {
+            for sub_block in 0..4 {
+                let index = (row * (w / 8) + tile_x) * 4 + sub_block;
+                let Some(block) = data.get(index * block_size..(index + 1) * block_size) else { return };
+                let (x0, y0) = (tile_x * 8 + sub_block % 2 * 4, sub_block / 2 * 4);
+                decode_etc1_block_into(block, alpha, texels, w, x0, y0);
             }
         }
-    }
-    // blocks the data is too short for read as nothing, as sample_texel has it
-    let blocks = data.len() / block_size;
-    if blocks < w * height as usize / 16 {
-        for index in blocks..w * height as usize / 16 {
-            let (tile, sub_block) = (index / 4, index % 4);
-            let x0 = (tile % (w / 8)) * 8 + sub_block % 2 * 4;
-            let y0 = (tile / (w / 8)) * 8 + sub_block / 2 * 4;
-            for y in 0..4 {
-                for x in 0..4 {
-                    out[(y0 + y) * w + x0 + x] = [0, 0, 0, 0];
-                }
-            }
-        }
+    };
+    // a big texture's rows on rayon's threads: a battle's first frame decodes several at once
+    if w * height as usize >= PARALLEL_DECODE_TEXELS {
+        use rayon::prelude::*;
+        out.par_chunks_mut(w * 8).enumerate().for_each(|(row, texels)| tile_row(row, texels));
+    } else {
+        out.chunks_mut(w * 8).enumerate().for_each(|(row, texels)| tile_row(row, texels));
     }
     Some(out)
+}
+
+/// textures from this many texels decode their tile rows in parallel.
+const PARALLEL_DECODE_TEXELS: usize = 128 * 128;
+
+/// one ETC1 (8 bytes) or ETC1A4 (8 bytes of alpha, then 8 of color) block into texels, a
+/// tile row w texels wide, at x0, y0 in it.
+fn decode_etc1_block_into(block: &[u8], alpha: bool, texels: &mut [[u8; 4]], w: usize, x0: usize, y0: usize) {
+    let (alphas, color) = if alpha { (Some(&block[0..8]), &block[8..16]) } else { (None, &block[0..8]) };
+    let alphas = alphas.map(|a| u64::from_le_bytes(a.try_into().unwrap()));
+    let word = u64::from_le_bytes(color.try_into().unwrap());
+    let (low, high) = ((word & 0xFFFF_FFFF) as u32, (word >> 32) as u32);
+    let bases = etc1_bases(high);
+    let flip = high & 1 != 0;
+    let tables = [((high >> 5) & 0x7) as usize, ((high >> 2) & 0x7) as usize];
+    for x in 0..4u32 {
+        for y in 0..4u32 {
+            let half = usize::from(!if flip { y < 2 } else { x < 2 });
+            let pixel_index = x * 4 + y;
+            let modifier = (((low >> (pixel_index + 16)) & 1) << 1 | ((low >> pixel_index) & 1)) as usize;
+            let delta = ETC1_MODIFIERS[tables[half]][modifier];
+            let base = bases[half];
+            let a = alphas.map_or(0xFF, |a| expand4(((a >> (pixel_index * 4)) & 0xF) as u8));
+            texels[(y0 + y as usize) * w + x0 + x as usize] = [
+                (base[0] as i32 + delta).clamp(0, 255) as u8,
+                (base[1] as i32 + delta).clamp(0, 255) as u8,
+                (base[2] as i32 + delta).clamp(0, 255) as u8,
+                a,
+            ];
+        }
+    }
 }
 
 /// the two base colors of an ETC1 block's halves, from its high word.
@@ -484,8 +502,8 @@ mod tests {
                 })
                 .collect()
         };
-        let (width, height) = (64u32, 32u32);
-        for format in [TextureFormat::Etc1, TextureFormat::Etc1A4] {
+        // the second size is big enough to decode on several threads
+        for ((width, height), format) in [(64u32, 32u32), (256, 128)].into_iter().flat_map(|size| [(size, TextureFormat::Etc1), (size, TextureFormat::Etc1A4)]) {
             let full = (width * height * format.bits_per_pixel() / 8) as usize;
             for size in [full, full - 24] {
                 let data = random(size);
@@ -515,8 +533,8 @@ mod tests {
                 })
                 .collect()
         };
-        let (width, height) = (64u32, 32u32);
-        for raw in 0..12 {
+        // the second size is big enough to decode on several threads
+        for ((width, height), raw) in [(64u32, 32u32), (256, 128)].into_iter().flat_map(|size| (0..12).map(move |raw| (size, raw))) {
             let format = TextureFormat::from_raw(raw);
             let full = (width * height * format.bits_per_pixel() / 8) as usize;
             for size in [full, full - 13, full / 2, 0] {

@@ -110,6 +110,7 @@ pub fn load(path: impl AsRef<std::path::Path>, mut config: Config) -> Result<Sys
         log::info!("{} enhancements for this build, {build}, on: {}", enhancements.len(), if on.is_empty() { "none".to_owned() } else { on.join(", ") });
     }
     system.cheats.extend(enhancements);
+    system.tones = crate::enhancements::tones(title.program_id(), &build);
     system.memory = memory::Memory::new(system.config.new3ds, app_bytes);
     system.kernel = crate::kernel::Kernel::new(
         title.program_id(),

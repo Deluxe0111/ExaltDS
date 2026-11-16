@@ -1,4 +1,5 @@
 #version 450
+#extension GL_EXT_control_flow_attributes : require
 
 // the PICA200's fragment stages for one draw, the texture units, fragment
 // lighting and the six combiners, then the alpha test. they follow the
@@ -55,6 +56,19 @@ layout(constant_id = 28) const uint DEPTH_MODE = 0u;
 // without when they are off. it masks the rest as hardware.rs masks the
 // constants, so the two draw the same
 layout(constant_id = 29) const uint DYNAMIC = 0u;
+// fragment lighting's shape (B05), when LIGHTING has bit 1 ("shaped"): bits 2-4 the light count
+// less one, 5 configuration 8, 6 and 7 fresnel into the primary / secondary alpha, 8 clamp
+// highlights, 9 and 10 the half / view vector read, 11 bump mapping on, 12 the shadow on,
+// then whether any light is 13 distance attenuated, 14 a spotlight, 15 geometric, 16
+// shadowed, 17 two sided, and 20-26 which of the seven lookups are on. LIGHT_LOOKUPS holds
+// each lookup's input in 3 bits and its abs above, 4 bits a lookup. they are the values the
+// draw's uniforms hold, so the shader draws the same; the light loop and the lookups' switch
+// then compile away. unshaped (the generic pipeline, keys from before), all comes from the
+// uniforms
+layout(constant_id = 30) const uint LIGHT_LOOKUPS = 0u;
+const bool SHAPED = (LIGHTING & 2u) != 0u;
+// bump mapping may be on: unshaped, or shaped with it on (0/1 arithmetic, see READS_LIGHTING)
+const uint BUMP_ON = 1u - ((LIGHTING >> 1u) & 1u) * (1u - ((LIGHTING >> 11u) & 1u));
 
 layout(set = 0, binding = 0) uniform sampler2D texture0;
 layout(set = 0, binding = 1) uniform sampler2D texture1;
@@ -195,7 +209,10 @@ float proctex_random(uint x, uint y) {
     v += 10u + u;
     v &= 0xFu;
     v ^= mixes[u];
-    return -1.0 + float(v) * 2.0 / 15.0;
+    // precise spelled out: older glslang does not carry it in from the callers
+    precise float scaled = float(v) * 2.0 / 15.0;
+    precise float noise = -1.0 + scaled;
+    return noise;
 }
 
 float proctex_shift(float other, uint mode, uint clamping) {
@@ -302,14 +319,27 @@ precise float quantize(float c) {
 }
 
 // what fragment lighting leaves in the primary and secondary colors
+// whether lookup i is on, its input and whether it takes the absolute value, from the
+// pipeline's shape or the draw's uniforms
+bool lookup_on(uint i) {
+    return SHAPED ? ((LIGHTING >> (20u + i)) & 1u) != 0u : lookups[i].x != 0u;
+}
+uint lookup_input(uint i) {
+    return SHAPED ? (LIGHT_LOOKUPS >> (4u * i)) & 7u : lookups[i].y;
+}
+bool lookup_abs(uint i) {
+    return SHAPED ? ((LIGHT_LOOKUPS >> (4u * i + 3u)) & 1u) != 0u : lookups[i].z != 0u;
+}
+
 void shade(vec4 textures[4], out vec4 diffuse_out, out vec4 specular_out) {
-    uint config = light_config.x;
+    bool config8 = SHAPED ? (LIGHTING & 32u) != 0u : light_config.x == 8u;
     float length_q = length(in_quaternion);
     vec4 q = length_q > 0.0 ? in_quaternion / length_q : vec4(0.0, 0.0, 0.0, 1.0);
 
     uint shadow_word = light_config.w;
+    bool shadow_on = SHAPED ? (LIGHTING & 0x1000u) != 0u : (shadow_word & 1u) != 0u;
     vec4 shadow = vec4(1.0);
-    if ((shadow_word & 1u) != 0u) {
+    if (shadow_on) {
         shadow = textures[(shadow_word >> 4) & 3u];
         if ((shadow_word & 0x100u) != 0u) {
             shadow = vec4(1.0) - shadow;
@@ -319,7 +349,7 @@ void shade(vec4 textures[4], out vec4 diffuse_out, out vec4 specular_out) {
     vec3 surface_normal = vec3(0.0, 0.0, 1.0);
     vec3 surface_tangent = vec3(1.0, 0.0, 0.0);
     uint bump = light_config.z;
-    uint bump_mode = bump & 3u;
+    uint bump_mode = BUMP_ON != 0u ? bump & 3u : 0u;
     if (bump_mode == 1u) {
         surface_normal = textures[(bump >> 4) & 3u].xyz * 2.0 - 1.0;
         if ((bump & 0x100u) != 0u) {
@@ -329,18 +359,24 @@ void shade(vec4 textures[4], out vec4 diffuse_out, out vec4 specular_out) {
         surface_tangent = textures[(bump >> 4) & 3u].xyz * 2.0 - 1.0;
     }
     vec3 normal = rotate(q, surface_normal);
-    vec3 tangent = config == 8u ? rotate(q, surface_tangent) : surface_tangent;
-    bool needs_half = (light_flags.w & 1u) != 0u;
-    bool needs_view = (light_flags.w & 2u) != 0u;
+    vec3 tangent = config8 ? rotate(q, surface_tangent) : surface_tangent;
+    bool needs_half = SHAPED ? (LIGHTING & 0x200u) != 0u : (light_flags.w & 1u) != 0u;
+    bool needs_view = SHAPED ? (LIGHTING & 0x400u) != 0u : (light_flags.w & 2u) != 0u;
+    bool fresnel_primary = SHAPED ? (LIGHTING & 0x40u) != 0u : light_flags.x != 0u;
+    bool fresnel_secondary = SHAPED ? (LIGHTING & 0x80u) != 0u : light_flags.y != 0u;
+    bool clamp_highlights = SHAPED ? (LIGHTING & 0x100u) != 0u : light_flags.z != 0u;
+    // the light flags any light has: directional always, the rest as the shape says
+    uint any_flags = SHAPED ? 1u | ((LIGHTING >> 17u) & 1u) * 2u | ((LIGHTING >> 15u) & 1u) * 12u
+        | ((LIGHTING >> 13u) & 1u) * 16u | ((LIGHTING >> 14u) & 1u) * 32u | ((LIGHTING >> 16u) & 1u) * 64u : 0xFFFFFFFFu;
     vec3 view = in_view.xyz;
     vec3 norm_view = needs_view ? normalize(view) : vec3(0.0);
 
     precise vec4 diffuse_sum = vec4(0.0, 0.0, 0.0, 1.0);
     precise vec4 specular_sum = vec4(0.0, 0.0, 0.0, 1.0);
-    uint count = light_config.y;
-    for (uint slot = 0u; slot < count; slot++) {
+    uint count = SHAPED ? ((LIGHTING >> 2u) & 7u) + 1u : light_config.y;
+    [[unroll]] for (uint slot = 0u; slot < count; slot++) {
         Light light = lights[slot];
-        uint flags = light.flags.x;
+        uint flags = light.flags.x & any_flags;
         uint number = light.flags.y;
         bool two_sided = (flags & 2u) != 0u;
         vec3 light_vector = (flags & 1u) != 0u ? light.direction.xyz : normalize(light.position.xyz + view);
@@ -360,21 +396,20 @@ void shade(vec4 textures[4], out vec4 diffuse_out, out vec4 specular_out) {
         }
 
         float values[7];
-        for (uint i = 0u; i < 7u; i++) {
+        [[unroll]] for (uint i = 0u; i < 7u; i++) {
             values[i] = 1.0;
-            uvec4 l = lookups[i];
-            if (l.x == 0u || (i == 6u && (flags & 32u) == 0u)) {
+            if (!lookup_on(i) || (i == 6u && (flags & 32u) == 0u)) {
                 continue;
             }
             float result = 0.0;
-            switch (l.y) {
+            switch (lookup_input(i)) {
                 case 0u: result = dot(normal, half_unit); break;
                 case 1u: result = dot(norm_view, half_unit); break;
                 case 2u: result = dot(normal, norm_view); break;
                 case 3u: result = dot(light_vector, normal); break;
                 case 4u: result = dot(light_vector, light.spot.xyz); break;
                 case 5u:
-                    if (config == 8u) {
+                    if (config8) {
                         float along = dot(normal, half_unit);
                         result = dot(half_unit - normal * along, tangent);
                     }
@@ -383,7 +418,7 @@ void shade(vec4 textures[4], out vec4 diffuse_out, out vec4 specular_out) {
             }
             uint entry;
             float delta;
-            if (l.z != 0u) {
+            if (lookup_abs(i)) {
                 result = two_sided ? abs(result) : max(result, 0.0);
                 float e = clamp(floor(result * 256.0), 0.0, 255.0);
                 entry = uint(e);
@@ -401,28 +436,28 @@ void shade(vec4 textures[4], out vec4 diffuse_out, out vec4 specular_out) {
                 : i == 4u ? REFLECT_GREEN
                 : i == 5u ? REFLECT_BLUE
                 : SPOTLIGHT + number;
-            values[i] = uintBitsToFloat(l.w) * lookup(table, entry, delta);
+            values[i] = uintBitsToFloat(lookups[i].w) * lookup(table, entry, delta);
         }
 
         float spot = values[6];
         float red = values[3];
-        vec3 reflect_color = vec3(red, lookups[4].x != 0u ? values[4] : red, lookups[5].x != 0u ? values[5] : red);
+        vec3 reflect_color = vec3(red, lookup_on(4u) ? values[4] : red, lookup_on(5u) ? values[5] : red);
         vec3 specular0 = light.specular0.rgb * values[0];
         vec3 specular1 = values[1] * reflect_color * light.specular1.rgb;
 
         // only the last light applies fresnel
-        if (slot == count - 1u && lookups[2].x != 0u) {
-            if (light_flags.x != 0u) {
+        if (slot == count - 1u && lookup_on(2u)) {
+            if (fresnel_primary) {
                 diffuse_sum.a = values[2];
             }
-            if (light_flags.y != 0u) {
+            if (fresnel_secondary) {
                 specular_sum.a = values[2];
             }
         }
 
         float facing = dot(light_vector, normal);
         facing = two_sided ? abs(facing) : max(facing, 0.0);
-        float highlights = light_flags.z != 0u && facing == 0.0 ? 0.0 : 1.0;
+        float highlights = clamp_highlights && facing == 0.0 ? 0.0 : 1.0;
         if ((flags & 12u) != 0u) {
             float length2 = dot(half_vector, half_vector);
             float factor = length2 == 0.0 ? 0.0 : min(facing / length2, 1.0);
@@ -434,7 +469,7 @@ void shade(vec4 textures[4], out vec4 diffuse_out, out vec4 specular_out) {
             }
         }
 
-        bool shadowed = (flags & 64u) != 0u && (shadow_word & 1u) != 0u;
+        bool shadowed = (flags & 64u) != 0u && shadow_on;
         vec3 shadow_primary = shadowed && (shadow_word & 0x200u) != 0u ? shadow.rgb : vec3(1.0);
         vec3 shadow_secondary = shadowed && (shadow_word & 0x400u) != 0u ? shadow.rgb : vec3(1.0);
         vec3 diffuse = (light.diffuse.rgb * facing + light.ambient.rgb) * distance * spot;
@@ -443,11 +478,11 @@ void shade(vec4 textures[4], out vec4 diffuse_out, out vec4 specular_out) {
         specular_sum.rgb += specular * shadow_secondary;
     }
 
-    if ((shadow_word & 0x800u) != 0u) {
-        if (light_flags.x != 0u) {
+    if (shadow_on && (shadow_word & 0x800u) != 0u) {
+        if (fresnel_primary) {
             diffuse_sum.a *= shadow.a;
         }
-        if (light_flags.y != 0u) {
+        if (fresnel_secondary) {
             specular_sum.a *= shadow.a;
         }
     }
@@ -621,6 +656,43 @@ void combine_stage(
     }
 }
 
+
+// what each pipeline's constants say about its combiners, worked out as it compiles (B05).
+// a source of 1 or 2 is fragment lighting; one past 6 other than E (the constant) is the
+// previous stage's result or the buffer. only the inputs an operation reads count: replace
+// reads the first, lerp (4), multiply-add (8) and add-multiply (9 and past) all three, the
+// rest two. spelled as 0/1 uints with & and |, as the shader compiler's optimizer
+// mishandles the ! it makes of && and || in these
+#define IS(s, v) uint((s) == (v))
+#define LIT(s) (IS(s, 1u) | IS(s, 2u))
+#define READS1(op) uint(((op) & 0xFu) != 0u)
+#define READS2(op) (IS((op) & 0xFu, 4u) | uint(((op) & 0xFu) >= 8u))
+#define SOURCE_AT(S, shift) (((S) >> (shift)) & 0xFu)
+#define STAGE_READS_LIGHTING(S, C) ( \
+    LIT(SOURCE_AT(S, 0u)) | (READS1(C) & LIT(SOURCE_AT(S, 4u))) | (READS2(C) & LIT(SOURCE_AT(S, 8u))) | \
+    LIT(SOURCE_AT(S, 16u)) | (READS1((C) >> 16u) & LIT(SOURCE_AT(S, 20u))) | (READS2((C) >> 16u) & LIT(SOURCE_AT(S, 24u))))
+// the generic pipeline reads its combiners as it runs, so it always lights
+const bool READS_LIGHTING = (uint(DYNAMIC != 0u)
+    | STAGE_READS_LIGHTING(SOURCE0, COMBINER0) | STAGE_READS_LIGHTING(SOURCE1, COMBINER1)
+    | STAGE_READS_LIGHTING(SOURCE2, COMBINER2) | STAGE_READS_LIGHTING(SOURCE3, COMBINER3)
+    | STAGE_READS_LIGHTING(SOURCE4, COMBINER4) | STAGE_READS_LIGHTING(SOURCE5, COMBINER5)) != 0u;
+// an alpha input that needs nothing but the textures, the vertex color, the constant and
+// earlier alphas: not lighting, and no color channel of the previous result or the buffer
+#define UNCHAINED(s) (uint((s) <= 6u) | IS(s, 0xEu))
+#define ALPHA_INPUT_UNLIT(S, O, i) ((1u - LIT(SOURCE_AT(S, 16u + 4u * (i)))) & \
+    (UNCHAINED(SOURCE_AT(S, 16u + 4u * (i))) | uint((((O) >> (12u + 4u * (i))) & 7u) < 2u)))
+// for the inputs the alpha operation reads, and no DOT3_RGBA, which writes a color into it
+#define STAGE_ALPHA_UNLIT(S, O, C) (ALPHA_INPUT_UNLIT(S, O, 0u) & \
+    ((1u - READS1((C) >> 16u)) | ALPHA_INPUT_UNLIT(S, O, 1u)) & \
+    ((1u - READS2((C) >> 16u)) | ALPHA_INPUT_UNLIT(S, O, 2u)) & uint(((C) & 0xFu) != 7u))
+// the alpha test can then come before lighting and the color combiners: a fragment it
+// throws away pays for neither. the alpha it tests is worked out by the same operations
+// the color's alpha is, so it is the same value, and the test after them is left out
+const bool EARLY_ALPHA_TEST = (uint(DYNAMIC == 0u) & uint((ALPHA_TEST & 1u) != 0u)
+    & STAGE_ALPHA_UNLIT(SOURCE0, OPERAND0, COMBINER0) & STAGE_ALPHA_UNLIT(SOURCE1, OPERAND1, COMBINER1)
+    & STAGE_ALPHA_UNLIT(SOURCE2, OPERAND2, COMBINER2) & STAGE_ALPHA_UNLIT(SOURCE3, OPERAND3, COMBINER3)
+    & STAGE_ALPHA_UNLIT(SOURCE4, OPERAND4, COMBINER4) & STAGE_ALPHA_UNLIT(SOURCE5, OPERAND5, COMBINER5)) != 0u;
+
 #ifdef WRITES_DEPTH
 // what the GPU shaded maps z/w itself, which the clipper got exactly.
 // precise as the combiners are. built so only for a w-buffer and for a
@@ -672,7 +744,28 @@ void main() {
     // color and there is no specular term
     vec4 fragment_primary = primary;
     vec4 fragment_secondary = vec4(0.0, 0.0, 0.0, 1.0);
-    if (LIGHTING != 0u) {
+    uint update = DYNAMIC != 0u ? misc.x & 0xFF00u : UPDATE;
+    uint alpha_test = DYNAMIC != 0u ? misc.z & 0x71u : ALPHA_TEST;
+
+    if (EARLY_ALPHA_TEST) {
+        // the combiners for the alpha alone, lighting standing in unlit, which the alpha
+        // does not read; the color they work out goes unused
+        vec4 alpha_previous = primary;
+        vec4 alpha_held = vec4(0.0);
+        vec4 alpha_next = unpack_color(misc.y);
+        combine_stage(0u, uvec4(SOURCE0, OPERAND0, COMBINER0, SCALE0), update, primary, primary, fragment_secondary, textures, alpha_previous, alpha_held, alpha_next);
+        combine_stage(1u, uvec4(SOURCE1, OPERAND1, COMBINER1, SCALE1), update, primary, primary, fragment_secondary, textures, alpha_previous, alpha_held, alpha_next);
+        combine_stage(2u, uvec4(SOURCE2, OPERAND2, COMBINER2, SCALE2), update, primary, primary, fragment_secondary, textures, alpha_previous, alpha_held, alpha_next);
+        combine_stage(3u, uvec4(SOURCE3, OPERAND3, COMBINER3, SCALE3), update, primary, primary, fragment_secondary, textures, alpha_previous, alpha_held, alpha_next);
+        combine_stage(4u, uvec4(SOURCE4, OPERAND4, COMBINER4, SCALE4), update, primary, primary, fragment_secondary, textures, alpha_previous, alpha_held, alpha_next);
+        combine_stage(5u, uvec4(SOURCE5, OPERAND5, COMBINER5, SCALE5), update, primary, primary, fragment_secondary, textures, alpha_previous, alpha_held, alpha_next);
+        precise float early_alpha = floor(alpha_previous.a * 255.0);
+        if (!compare((alpha_test >> 4) & 7u, early_alpha, float((misc.z >> 8) & 0xFFu))) {
+            discard;
+        }
+    }
+
+    if (LIGHTING != 0u && READS_LIGHTING) {
         shade(textures, fragment_primary, fragment_secondary);
     }
 
@@ -681,7 +774,6 @@ void main() {
     // the configured buffer color
     vec4 held = vec4(0.0);
     vec4 next_buffer = unpack_color(misc.y);
-    uint update = DYNAMIC != 0u ? misc.x & 0xFF00u : UPDATE;
     combine_stage(0u, stage_registers(0u, uvec4(SOURCE0, OPERAND0, COMBINER0, SCALE0)), update, primary, fragment_primary, fragment_secondary, textures, previous, held, next_buffer);
     combine_stage(1u, stage_registers(1u, uvec4(SOURCE1, OPERAND1, COMBINER1, SCALE1)), update, primary, fragment_primary, fragment_secondary, textures, previous, held, next_buffer);
     combine_stage(2u, stage_registers(2u, uvec4(SOURCE2, OPERAND2, COMBINER2, SCALE2)), update, primary, fragment_primary, fragment_secondary, textures, previous, held, next_buffer);
@@ -694,8 +786,9 @@ void main() {
     // knows the operands it works 1 - a times 255 out as 255 - 255a, which
     // rounds to the other side of a byte
     precise vec4 color = floor(previous * 255.0);
-    uint alpha_test = DYNAMIC != 0u ? misc.z & 0x71u : ALPHA_TEST;
-    if ((alpha_test & 1u) != 0u && !compare((alpha_test >> 4) & 7u, color.a, float((misc.z >> 8) & 0xFFu))) {
+    if (EARLY_ALPHA_TEST) {
+        // tested before lighting, with the same alpha
+    } else if ((alpha_test & 1u) != 0u && !compare((alpha_test >> 4) & 7u, color.a, float((misc.z >> 8) & 0xFFu))) {
         discard;
     }
     // the fog, by the fragment's depth through its table, the table's factor
