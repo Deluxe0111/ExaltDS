@@ -11,9 +11,15 @@
 //! an earlier player phase. The list belongs to one battle: it starts over when the structure moves
 //! (another map) or is gone.
 //!
+//! The game asks for a restore from its own map menu: title.so's override
+//! `overrides/awakening-usa/recall_fate.c` (Awakening-Port) adds a Recall Fate entry and a list of
+//! these turns, reading them with `zakuro_recall_turns` and asking with `zakuro_recall_request`;
+//! the restore happens after the frame in which it was asked for.
+//!
 //! Development switch: `adb shell setprop debug.zakuro.recall_watch 1` (read at launch) also logs
 //! the structure's first 0x30 bytes whenever they change, the frame counter left out.
 
+use std::sync::atomic::{AtomicU32, Ordering};
 use std::sync::Mutex;
 
 use zakuro_core::System;
@@ -37,6 +43,32 @@ static TURNS: Mutex<Vec<u16>> = Mutex::new(Vec::new());
 
 pub fn turns() -> Vec<u16> {
     TURNS.lock().unwrap_or_else(|e| e.into_inner()).clone()
+}
+
+/// a turn the game's menu asked to go back to, 0 for none
+static REQUEST: AtomicU32 = AtomicU32::new(0);
+
+/// For title.so's override: the turns that can be recalled, newest first, into `out`; gives how
+/// many there are.
+///
+/// # Safety
+/// `out` points to `length` writable u16s (or `length` is 0).
+#[no_mangle]
+pub unsafe extern "C" fn zakuro_recall_turns(out: *mut u16, length: usize) -> usize {
+    let turns = turns();
+    if !out.is_null() {
+        for (i, turn) in turns.iter().take(length).enumerate() {
+            // SAFETY: the caller gives room for `length` values and i < length
+            unsafe { *out.add(i) = *turn };
+        }
+    }
+    turns.len()
+}
+
+/// For title.so's override: go back to the start of that turn's player phase after this frame.
+#[no_mangle]
+pub extern "C" fn zakuro_recall_request(turn: u16) {
+    REQUEST.store(u32::from(turn), Ordering::Release);
 }
 
 struct Snapshot {
@@ -64,11 +96,21 @@ impl Recall {
         Recall { on: true, checked_title: false, watch, battle: 0, saved: None, looked: false, snapshots: Vec::new(), watched: [0; WATCH_WORDS] }
     }
 
-    /// after each emulated frame: a new player phase is saved
-    pub fn after_frame(&mut self, system: &mut System) {
+    /// after each emulated frame: a restore the game's menu asked for is done (and its outcome
+    /// given back, for the message), else a new player phase is saved
+    pub fn after_frame(&mut self, system: &mut System) -> Option<Result<u16, String>> {
+        let request = REQUEST.swap(0, Ordering::AcqRel) as u16;
         if !self.on {
-            return;
+            return None;
         }
+        if request != 0 && self.checked_title {
+            return Some(self.recall(system, request).map(|()| request));
+        }
+        self.saving(system);
+        None
+    }
+
+    fn saving(&mut self, system: &mut System) {
         if !self.checked_title {
             self.checked_title = true;
             let id = system.title.as_ref().map(|t| t.program_id()).unwrap_or(0);

@@ -1045,7 +1045,17 @@ pub fn run(app: &AndroidApp) -> Result<(), String> {
         }
         let cycles_before = system.cpu.cycles;
         let outcome = system.run_frame();
-        recall.after_frame(system);
+        // Recall Fate asked for from the game's own map menu
+        if let Some(outcome) = recall.after_frame(system) {
+            match outcome {
+                Ok(turn) => platform::message(app, &format!("Back to turn {turn}")),
+                Err(error) => platform::message(app, &error),
+            }
+            audio = None;
+            input = Input::default();
+            bridge::clear_input();
+            next_frame = Instant::now();
+        }
         let cycles = system.cpu.cycles.saturating_sub(cycles_before);
         stats_cycles += cycles;
         benchmark_cycles += cycles;
