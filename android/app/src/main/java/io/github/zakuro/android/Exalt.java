@@ -53,6 +53,8 @@ final class Exalt {
         final String name; final boolean on;
         Layer(String name, boolean on) { this.name = name; this.on = on; }
         boolean feet() { return name.toLowerCase(Locale.ROOT).contains("feet"); }
+        /** the Naga's Tear layer (tools/naga-tear in Awakening-Port): its scripts add the world-map introduction */
+        boolean naga() { return name.toLowerCase(Locale.ROOT).contains("naga"); }
     }
 
     static List<Layer> list(Context c, String id) {
@@ -72,6 +74,11 @@ final class Exalt {
 
     static Layer feet(Context c, String id) {
         for (Layer l : list(c, id)) if (l.feet()) return l;
+        return null;
+    }
+
+    static Layer naga(Context c, String id) {
+        for (Layer l : list(c, id)) if (l.naga()) return l;
         return null;
     }
 

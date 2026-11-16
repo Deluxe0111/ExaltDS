@@ -351,7 +351,9 @@ final class ImportPlan {
             if (crc.getValue() != expected) throw new IOException("Invalid PNG chunk checksum: " + name);
             at += size + 12;
             if (type == 0x49454e44) {
-                if (!data || size != 0 || at != length) throw new IOException("Incomplete PNG image: " + name);
+                // Bytes after IEND are left alone, as PNG readers do (the runtime's included): some packs ship files
+                // whose IEND is written twice (Awakening HD on GameBanana), and they draw correctly.
+                if (!data || size != 0) throw new IOException("Incomplete PNG image: " + name);
                 return header;
             }
         }

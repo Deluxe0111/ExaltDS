@@ -24,7 +24,7 @@ import java.util.*;
  * frame rate, 16:9, feet, resolution, HD textures, mods and the GPU driver.
  */
 final class Sidebar {
-    static final int PICK_MOD = 0x5100, PICK_DRIVER = 0x5101;
+    static final int PICK_MOD = 0x5100, PICK_DRIVER = 0x5101, PICK_CODE = 0x5102;
     private static final String[] COMBAT = {"30 fps (original)", "60 fps, original speed", "60 fps, faster"};
     private static final String[] PERF = {"Off", "FPS", "FPS + frame time", "FPS + frame time + temps"};
 
@@ -232,6 +232,15 @@ final class Sidebar {
         });
         if (feet == null) { feetBox.setEnabled(false); feetBox.setAlpha(0.45f); feetBox.setText("Feet mod: import it in Mods / textures"); }
         main.addView(feetBox);
+        // Naga's Tear: offers the relic to campaigns that don't have it yet (Robin and Chrom's scene on the world map).
+        // A campaign that has it keeps it in its save; turning this off only stops offering it.
+        Exalt.Layer naga = Exalt.naga(game, id);
+        CheckBox nagaBox = check("Naga's Tear (offer on the world map)", naga != null && naga.on, on -> {
+            Exalt.Layer n = Exalt.naga(game, id);
+            if (n != null) { Exalt.setOn(game, id, n.name, on); modsChanged = true; refreshApply(); }
+        });
+        if (naga == null) { nagaBox.setEnabled(false); nagaBox.setAlpha(0.45f); nagaBox.setText("Naga's Tear: import its layer in Mods / textures"); }
+        main.addView(nagaBox);
         boolean pack = hasPack();
         CheckBox hd = check("HD textures", pack && s.textures, on -> { s.textures = on; save(); });
         if (!pack) { hd.setEnabled(false); hd.setAlpha(0.45f); hd.setText("HD textures: import a pack in Mods / textures"); }
@@ -240,6 +249,8 @@ final class Sidebar {
 
         main.addView(row("Mods / textures…", v -> show(mods)));
         main.addView(row("GPU driver…", v -> show(drivers)));
+        // a rebuilt title.so in place: keeps the ROM, textures, mods, saves and save states (Replace game files drops the states)
+        main.addView(row("Replace native game code…", v -> pick(PICK_CODE)));
         main.addView(row("All settings…", v -> { close(true); game.openSettings(); }));
         main.addView(divider());
         main.addView(row("Restart game", v -> { close(true); game.confirmRestart(); }));
@@ -367,30 +378,32 @@ final class Sidebar {
     private void pick(int request) {
         Intent intent = request == PICK_MOD
                 ? new Intent(Intent.ACTION_OPEN_DOCUMENT_TREE).addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION | Intent.FLAG_GRANT_PREFIX_URI_PERMISSION)
-                : new Intent(Intent.ACTION_OPEN_DOCUMENT).setType("application/zip").addCategory(Intent.CATEGORY_OPENABLE).addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION);
+                : new Intent(Intent.ACTION_OPEN_DOCUMENT).setType(request == PICK_CODE ? "*/*" : "application/zip").addCategory(Intent.CATEGORY_OPENABLE).addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION);
         try { game.startActivityForResult(intent, request); }
         catch (android.content.ActivityNotFoundException e) { toast("No file picker is available."); }
     }
 
     /** True when the result was one of the sidebar's pickers. */
     boolean result(int request, int code, Intent data) {
-        if (request != PICK_MOD && request != PICK_DRIVER) return false;
+        if (request != PICK_MOD && request != PICK_DRIVER && request != PICK_CODE) return false;
         if (code != android.app.Activity.RESULT_OK || data == null || data.getData() == null || busy) return true;
         Uri uri = data.getData();
         busy = true;
-        toast(request == PICK_MOD ? "Importing…" : "Importing driver…");
+        toast(request == PICK_MOD ? "Importing…" : request == PICK_CODE ? "Replacing native game code…" : "Importing driver…");
         if (modsStatus != null && request == PICK_MOD) modsStatus.setText("Importing…");
         new Thread(() -> {
             String message;
             try {
                 if (request == PICK_MOD) message = Exalt.importFolder(game, id, uri, (bytes, files, name) ->
                         game.runOnUiThread(() -> { if (modsStatus != null) modsStatus.setText(String.format(Locale.ROOT, "Importing… %.1f MB, %d files", bytes / 1048576.0, files)); }));
+                else if (request == PICK_CODE) { GameImport.replaceCode(game, id, uri, (bytes, files, name) -> { }); message = "Native game code replaced. Apply and restart to use it."; }
                 else { Launcher.installDriver(game, id, uri); message = "Driver imported and selected."; }
             } catch (Exception e) { message = "Import failed: " + e.getMessage(); }
             String done = message;
             game.runOnUiThread(() -> {
                 busy = false;
                 s = GameSettings.load(game, id); // the driver import saved its choice itself
+                if (request == PICK_CODE && !done.startsWith("Import failed")) modsChanged = true; // shows Apply and restart
                 if (request == PICK_MOD && !done.startsWith("Import failed")) { modsChanged = true; if (done.startsWith("Texture")) { s.textures = true; save(); } }
                 toast(done);
                 if (open) { if (request == PICK_MOD) refreshMods(); else refreshDrivers(); refreshApply(); }

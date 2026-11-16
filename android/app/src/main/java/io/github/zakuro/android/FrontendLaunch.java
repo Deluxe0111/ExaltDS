@@ -29,7 +29,7 @@ public final class FrontendLaunch extends Activity {
                     try(FileInputStream in=new ParcelFileDescriptor.AutoCloseInputStream(descriptor)) { id=FrontendReference.read(in.getChannel()); }
                 }
             } else throw new IOException("Use a content URI or Zakuroishi game link");
-            startActivity(GameLaunch.intent(this,id)); finish();
+            GameLaunch.start(this, GameLaunch.intent(this,id)); finish();
         } catch(Exception e) {
             new AlertDialog.Builder(this).setTitle("Couldn't launch this game")
                 .setMessage("Import this game into Zakuroishi first. Frontend references use the installed game's settings and saves.\n\n"+e.getMessage())

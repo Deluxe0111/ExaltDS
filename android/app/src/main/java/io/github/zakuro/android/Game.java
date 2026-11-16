@@ -531,7 +531,7 @@ public final class Game extends NativeActivity {
             pendingRestart = null;
             next.addFlags(android.content.Intent.FLAG_ACTIVITY_NEW_TASK);
             android.content.Context application = getApplicationContext();
-            new android.os.Handler(android.os.Looper.getMainLooper()).post(() -> application.startActivity(next));
+            new android.os.Handler(android.os.Looper.getMainLooper()).post(() -> GameLaunch.start(application, next));
         }
     }
     @Override public void onWindowFocusChanged(boolean focused) {

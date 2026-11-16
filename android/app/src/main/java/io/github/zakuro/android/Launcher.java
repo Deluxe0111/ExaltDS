@@ -447,7 +447,7 @@ public final class Launcher extends Activity {
     private void play(String id) {
         if (task.busy) return;
         try {
-            startActivity(GameLaunch.intent(this,id));
+            GameLaunch.start(this, GameLaunch.intent(this,id));
         } catch (Exception e) { controllerDialog(new AlertDialog.Builder(this, p.dialogTheme()).setTitle("Couldn't open this game").setMessage("Open Settings to replace native game code without copying the ROM.\n\n" + e.getMessage()).setPositiveButton("OK", null).create()).show(); }
     }
     private void update() {

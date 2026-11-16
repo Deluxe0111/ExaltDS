@@ -138,7 +138,7 @@ public final class ExaltHome extends Activity {
     private void play() {
         String id = Exalt.gameId(this);
         try {
-            startActivity(GameLaunch.intent(this, id));
+            GameLaunch.start(this, GameLaunch.intent(this, id));
             finish();
         } catch (Exception e) {
             Exalt.prefs(this).edit().putBoolean("launch_failed", true).commit();

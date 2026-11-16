@@ -314,7 +314,15 @@ public final class ImportPlanCheck {
         bytes = new byte[45]; System.arraycopy(PNG, 0, bytes, 0, 33);
         System.arraycopy(PNG, PNG.length - 12, bytes, 33, 12);
         rejectedPng(bytes, "IEND without IDAT");
-        rejectedPng(Arrays.copyOf(PNG, PNG.length + 1), "bytes after IEND");
+        for (byte[] tail : new byte[][]{new byte[1], Arrays.copyOfRange(PNG, PNG.length - 12, PNG.length)}) {
+            // a stray byte, and IEND written twice (as in the Awakening HD pack): taken, like PNG readers do
+            byte[] trailing = Arrays.copyOf(PNG, PNG.length + tail.length);
+            System.arraycopy(tail, 0, trailing, PNG.length, tail.length);
+            Tree tree = valid(); Blob blob = tree.blobs.get("texture");
+            blob.prefix = trailing; blob.length = trailing.length;
+            reportedSize(tree, "texture-sub", "texture", trailing.length);
+            check(ImportPlan.texturePack(tree, "textures", TITLE).files.size() == 2, "PNG with bytes after IEND rejected");
+        }
         java.io.ByteArrayOutputStream raw = new java.io.ByteArrayOutputStream();
         raw.write(PNG, 0, 33);
         NativeFixture.chunk(new java.io.DataOutputStream(raw), "vpAg", new byte[140000]);

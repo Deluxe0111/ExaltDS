@@ -21,4 +21,21 @@ final class GameLaunch {
         settings.apply(intent,version);
         return intent;
     }
+
+    /**
+     * Where the game opens. With the bottom screen on a second display it is always the main display: started from a
+     * launcher on the second screen (the AYN Thor's lower one) it would open there, and the bottom screen could not go
+     * to the main display, which takes no presentations ("Second display disconnected").
+     */
+    static android.os.Bundle options(Context context, Intent intent) {
+        String id = intent.getStringExtra("game_id");
+        try { if (id == null || !GameSettings.load(context, id).flag("dual_display")) return null; }
+        catch (Exception e) { return null; }
+        return android.app.ActivityOptions.makeBasic().setLaunchDisplayId(android.view.Display.DEFAULT_DISPLAY).toBundle();
+    }
+
+    static void start(Context context, Intent intent) {
+        try { context.startActivity(intent, options(context, intent)); }
+        catch (SecurityException e) { context.startActivity(intent); } // a display we may not launch on: Android's choice
+    }
 }
