@@ -1,28 +1,86 @@
-# ExaltDS
+<h1 align="center">ExaltDS</h1>
 
-**Fire Emblem Awakening, recompiled for Android handhelds.** ExaltDS turns your own copy of the game into native ARM64
-code on your device and runs it with a Vulkan renderer, at up to 4× resolution and 60 fps in combat.
+<p align="center"><b>Fire Emblem Awakening, rebuilt to run natively on dual-screen Android handhelds.</b></p>
 
-> Early, experimental software. Tested on an AYN Thor (Snapdragon 8 Gen 2) with the US release of the game.
+<p align="center">
+  <a href="https://github.com/teton-dev/ExaltDS/releases">Download</a> ·
+  <a href="#recall-fate">Recall Fate</a> ·
+  <a href="#install">Install</a> ·
+  <a href="#where-its-going">Roadmap</a>
+</p>
+
+<p align="center"><img src="docs/screenshots/exaltds-recall-fate.jpg" alt="Recall Fate listing the actions of a turn" width="720"></p>
+
+ExaltDS takes your own copy of Awakening and turns its code into native ARM64 on your handheld. There is no 3DS
+processor being emulated while you play, so the game has room to run at up to 4× resolution and a steady 60 fps in
+combat, on both screens, the way a handheld with two displays should.
+
+It is built for two devices, and tuned for them: the **AYN Thor** and the **Retroid Pocket Duo**.
+
+> **Status:** early, but playable. Everything here has been tested on the AYN Thor (Snapdragon 8 Gen 2) with the US
+> release of the game. The Retroid Pocket Duo is a target device that hasn't been tested yet.
 
 ExaltDS contains **no game files**. You need your own legally obtained, decrypted copy of Fire Emblem Awakening.
 
-## What you get
+## Why ExaltDS
 
-- **Native game code**, built once from your ROM on the device. No CPU emulation while you play.
-- **Widescreen 16:9**, resolution up to 4×, and combat at 60 fps (original speed or faster).
-- **Feet on the ground**: the feet mod from the
+- **Made for two screens.** The top and bottom screens use the device's own two displays, with the top screen in
+  true 16:9. No letterboxing, no stretching a single window across both.
+- **Native, not emulated.** The game's code is recompiled once, on your device, from your own copy. After that it just
+  runs.
+- **Sharper than the original ever was.** Up to 4× resolution, optional HD texture packs, and a no-glow option so bright
+  scenes stay clean instead of washing out.
+- **Smooth combat.** Battles run at 60 fps, at the original speed or faster.
+- **Recall Fate.** Take back any move, not just the last one. More below.
+- **One app, one setup.** Pick your game file, press **Set up**, press **Play**. No PC step, no extra tools.
+
+## Recall Fate
+
+Fire Emblem is a game of consequences, and sometimes you want to see how it would have gone. Recall Fate adds a new
+entry to the battle map menu that lists every turn and every action of the current battle, each named after what
+happened: *Frederick - Separate*, *Lissa - Pair Up*, *Robin - Wait*. Pick one and the battle returns to just before it.
+
+- Go back to before any earlier action or turn, not only the last one.
+- Rewind the last five turns of a battle.
+- It sits in the game's own battle menu, in the game's own style.
+
+A short scene between Robin and Chrom introduces it the first time you reach the world map.
+
+<p align="center"><img src="docs/screenshots/exaltds-recall-fate-intro.jpg" alt="Robin and Chrom's introduction to Recall Fate" width="720"></p>
+
+Recall Fate is on by default. You can turn it off during setup, or later in the sidebar (this needs a restart).
+It's still experimental, so keep regular saves as you normally would.
+
+## Clean, bright 3D
+
+The game's glow effect adds a haze around bright areas, and at higher resolutions it gets heavier. The **No glow**
+option removes it, so characters and grass stay crisp without a halo and without the scene going dull.
+
+<p align="center"><img src="docs/screenshots/exaltds-no-glow.jpg" alt="The same scene with the original glow and with No glow" width="900"></p>
+
+## Everything else
+
+- **Widescreen 16:9** and resolution up to 4×.
+- **Feet on the ground:** the feet mod from the
   [Fire Emblem: Awakening recompilation project](https://github.com/Zelkin1/fe-awakening-recomp), built from your copy.
-- **Naga's Tear** (experimental): Recall Fate in the battle map menu takes you back to before any earlier action or
-  turn of the battle.
 - **HD texture packs**, if you have one (not included).
-- A sidebar (press Back) with save states, a performance monitor, the clock, mods and GPU drivers.
+- **A sidebar** (press Back in game) with save states, Quick Save and Quick Load, a performance monitor, a clock, mods,
+  and GPU drivers.
+- **Updates from inside the app.**
+
+<sub>The screenshots here use the [AAHD texture pack](https://gamebanana.com/mods/400809) (not included).</sub>
+
+## Where it's going
+
+ExaltDS targets the Thor and the Retroid Pocket Duo first, and it will stay that way until the main game and
+performance are fully polished on them. Support for single-screen devices and phones is planned after that, not before.
+It isn't supported today, and it's better to do it properly later than to do it partly now.
 
 ## Requirements
 
 | | |
 | --- | --- |
-| **Device** | 64-bit ARM, Android 11 or newer, Vulkan 1.3. Tested: AYN Thor (Snapdragon 8 Gen 2). |
+| **Device** | AYN Thor (tested) or Retroid Pocket Duo (target). 64-bit ARM, Android 11 or newer, Vulkan 1.3. |
 | **Game** | Fire Emblem Awakening, US release (`00040000000A0500`), as a decrypted `.3ds`/`.cci` or `.cia`. |
 | **DLC** | Optional: the decrypted DLC `.cia`. |
 | **Storage** | The game's size (about 2 GB) plus about 1 GB free during setup; the game's size plus about 0.3 GB after. |
@@ -33,18 +91,11 @@ ExaltDS contains **no game files**. You need your own legally obtained, decrypte
 1. Download the latest APK from the [Releases page](https://github.com/teton-dev/ExaltDS/releases).
 2. Install it. Later versions update from the sidebar (**Check for updates**); install over the app, **don't uninstall
    first** or you lose your saves.
-3. Open ExaltDS, choose your game file and, if you have it, the DLC file. **Naga's Tear** is on by default; untick it if
-   you don't want it. Then press **Set up**.
-4. Setup copies the game into the app, builds the feet and Naga's Tear from it and recompiles the game's code for your
-   device. On the AYN Thor this takes about 5 minutes; keep ExaltDS open and the device charging. Your saves are kept,
-   and you can delete your own copy of the game file afterwards.
+3. Open ExaltDS, choose your game file and, if you have it, the DLC file. Then press **Set up**.
+4. Setup copies the game into the app, builds the mods from it and recompiles the game's code for your device. On the
+   AYN Thor this takes about 5 minutes; keep ExaltDS open and the device charging. Your saves are kept, and you can
+   delete your own copy of the game file afterwards.
 5. Press **Play**. Settings, mods, texture packs and save states are in the sidebar: press Back in game.
-
-## Naga's Tear
-
-When you turn it on, Robin and Chrom find Naga's Tear the next time you enter the world map. From then on, **Recall
-Fate** in the battle map menu lists every turn and action of the battle; choose one to return to just before it. It is
-experimental and on by default (a box in setup); turning it on or off later, in the sidebar, needs a restart (Apply and restart).
 
 ## Privacy
 
