@@ -162,7 +162,16 @@ try {
             '-keysize','4096','-validity','10000','-dname','CN=Zakuro Android Windows Test')
     }
     $release = Join-Path $private 'release.p12'
-    if (Test-Path -LiteralPath $release) {
+    $exaltRelease = Join-Path $private 'exaltds-release.p12'
+    if ($Flavor -eq 'exalt' -and (Test-Path -LiteralPath $exaltRelease)) {
+        # ExaltDS's own release key; android/exalt/signing/lineage.bin proves it descends from test.p12, so
+        # test builds already installed update in place. Its password file is DPAPI-encrypted for this Windows user.
+        $env:EXALT_KEYSTORE_PASSWORD = [Net.NetworkCredential]::new('', (Get-Content -LiteralPath (Join-Path $private 'exaltds-release.password.dpapi') | ConvertTo-SecureString)).Password
+        try {
+            Invoke-Tool "$tools/apksigner.bat" @('sign','--ks',$exaltRelease,'--ks-pass','env:EXALT_KEYSTORE_PASSWORD','--ks-key-alias','exaltds-release',
+                '--lineage',"$repo/android/exalt/signing/lineage.bin",'--rotation-min-sdk-version','28','--v1-signing-enabled','false','--v2-signing-enabled','false','--out',$apk,"$work/aligned.apk")
+        } finally { Remove-Item Env:EXALT_KEYSTORE_PASSWORD }
+    } elseif (Test-Path -LiteralPath $release) {
         # The lineage proves this key descends from test.p12, so an installed app updates in place.
         # The password file is encrypted for this Windows user (DPAPI) and the value only travels through the environment.
         $env:ZAKURO_KEYSTORE_PASSWORD = [Net.NetworkCredential]::new('', (Get-Content -LiteralPath (Join-Path $private 'release.password.dpapi') | ConvertTo-SecureString)).Password

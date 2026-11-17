@@ -1,5 +1,5 @@
 <?xml version="1.0" encoding="utf-8"?>
 <resources>
     <!-- the GitHub repository whose latest release the app updates from (owner/name); empty: no update checks -->
-    <string name="exalt_repo" translatable="false"></string>
+    <string name="exalt_repo" translatable="false">teton-dev/ExaltDS</string>
 </resources>

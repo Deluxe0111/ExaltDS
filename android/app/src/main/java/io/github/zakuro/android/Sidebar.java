@@ -246,8 +246,8 @@ final class Sidebar {
         apply.setTypeface(Typeface.DEFAULT_BOLD);
         main.addView(apply);
         main.addView(row("Resume", v -> close()));
-        main.addView(row("Save state", v -> { game.command(Game.SAVE); close(); }));
-        main.addView(row("Load state", v -> { close(true); game.confirmLoad(); }));
+        main.addView(row("Quick Save", v -> { game.command(Game.SAVE); close(); }));
+        main.addView(row("Quick Load", v -> { close(true); game.confirmLoad(); }));
         main.addView(row("Save to slot…", v -> { close(true); game.slotMenu(true); }));
         main.addView(row("Load from slot…", v -> { close(true); game.slotMenu(false); }));
         main.addView(divider());

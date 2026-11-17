@@ -1,3 +1,6 @@
+> Zakuroishi's own README, kept for reference: ExaltDS is built from this tree. ExaltDS's README is the one at the
+> repository root.
+
 # Zakuroishi: 3DS emulator for Android handhelds
 
 An experimental Nintendo 3DS emulator for Android, built for dual-screen handhelds such as the
@@ -6,7 +9,7 @@ texture packs, frame generation and each screen on its own display. Nothing is d
 game's code is recompiled once on a PC with [3dsrecomp](https://github.com/fearkov/3dsrecomp).
 
 **[Download the latest Android release](https://github.com/Sekyleky/Zakuroishi/releases/latest)** ·
-[Setup guide](docs/android.md) · [Report a problem](https://github.com/Sekyleky/Zakuroishi/issues/new/choose)
+[Setup guide](android.md) · [Report a problem](https://github.com/Sekyleky/Zakuroishi/issues/new/choose)
 
 | A good fit if | Not for you yet if |
 | --- | --- |
@@ -30,32 +33,32 @@ firmware, keys or texture packs.
 the Android NDK installed; the APK does not make one.
 Everything here was tested on one device (an AYN Thor), mostly with one game
 (Pokémon Ultra Moon).
-See [known issues](docs/known-issues.md) and the [security notes](SECURITY.md): native
+See [known issues](known-issues.md) and the [security notes](../SECURITY.md): native
 game code and drivers you import run with the app's access.
 
-**Start here:** [Install, import and play](docs/android.md). For an existing import
+**Start here:** [Install, import and play](android.md). For an existing import
 that reports an incompatible native library, use the
-[native-code compatibility and repair guide](docs/native-library.md). An ARM64
+[native-code compatibility and repair guide](native-library.md). An ARM64
 file from Pocket Native is not automatically compatible: this host uses upstream
 3dsrecomp's ABI 5 (and still runs ABI 4), while the inspected Pocket Native
 fastmem generator's own ABI 5 needs a fast-memory context this host lacks.
 
 ## Documentation
 
-- [Controller mapping, fast-forward and frontend setup](docs/frontends.md)
+- [Controller mapping, fast-forward and frontend setup](frontends.md)
 
 | Need | Canonical page |
 | --- | --- |
-| Requirements, game folder, optional textures, controls and saves | [Android user guide](docs/android.md) |
-| Build a matching Android game library; repair without recopying a ROM | [Native library contract](docs/native-library.md) |
-| Every audited Pocket Native setting and upstream Zakuro feature | [Feature parity matrix](docs/feature-parity.md) |
-| Architecture, APK toolchains, developer tests | [Development](docs/development.md) |
-| What actually ran, on which source and architecture | [Verification record](docs/testing.md) |
-| Versioned changes, limitations and integration status | [Changelog](docs/changelog.md) |
-| What is not tested or not working | [Known issues](docs/known-issues.md) |
-| What you trust, what the app checks, how to report | [Security](SECURITY.md) |
-| Controlled performance measurement without claims | [Benchmark protocol](docs/benchmark.md) |
-| Desktop Zakuro usage from the pinned upstream baseline | [Upstream desktop reference](docs/upstream-desktop.md) |
+| Requirements, game folder, optional textures, controls and saves | [Android user guide](android.md) |
+| Build a matching Android game library; repair without recopying a ROM | [Native library contract](native-library.md) |
+| Every audited Pocket Native setting and upstream Zakuro feature | [Feature parity matrix](feature-parity.md) |
+| Architecture, APK toolchains, developer tests | [Development](development.md) |
+| What actually ran, on which source and architecture | [Verification record](testing.md) |
+| Versioned changes, limitations and integration status | [Changelog](changelog.md) |
+| What is not tested or not working | [Known issues](known-issues.md) |
+| What you trust, what the app checks, how to report | [Security](../SECURITY.md) |
+| Controlled performance measurement without claims | [Benchmark protocol](benchmark.md) |
+| Desktop Zakuro usage from the pinned upstream baseline | [Upstream desktop reference](upstream-desktop.md) |
 
 ## Current scope
 
@@ -78,11 +81,11 @@ and code-only replacement. Texture packs are optional at import and can be
 attached later without copying a ROM again. In-game saves stay at a stable
 per-title path. Settings are saved only on confirmation.
 
-The [feature matrix](docs/feature-parity.md) maps every audited source setting to
+The [feature matrix](feature-parity.md) maps every audited source setting to
 its actual consumer or an explicit limitation. Pocket Native's GLES-specific
 speed hacks are not automatically equivalent to this Vulkan backend; unsupported
 heuristics are not presented as working controls. This is an experimental test
-build, with [recorded checks and hardware limits](docs/testing.md). No performance
+build, with [recorded checks and hardware limits](testing.md). No performance
 claim is made beyond what the testing record measures.
 
 ## Verify the signing certificate
@@ -102,7 +105,7 @@ Releases after 0.3.1 are signed with the release certificate, `CN=Zakuroishi Rel
 Check it with `apksigner verify --print-certs APK`. Android only updates an installed app from an
 APK whose certificate matches or descends from the installed one. New APKs carry a signed lineage
 from the old certificate to the new one (`android/signing/lineage.bin`), so they install over the
-old ones and keep your data. See [Development](docs/development.md#release-key).
+old ones and keep your data. See [Development](development.md#release-key).
 
 ## Build the APK
 
@@ -116,13 +119,13 @@ From this repository in PowerShell, with the documented tools installed:
 
 These build the emulator APK, not a game's `title.so`. Both use the lockfile and
 write uniquely named signed test APKs. Tool versions, signing identities and the
-separate native game-code build are explained in [Development](docs/development.md)
-and [Native library contract](docs/native-library.md). No publication or installation
+separate native game-code build are explained in [Development](development.md)
+and [Native library contract](native-library.md). No publication or installation
 on a physical device is performed by these commands. A self-built APK is signed with a
 different key than the published ones and does not update over them.
 
 Zakuro and the upstream Pocket Native work are credited in the source-backed
-[matrix source inventory](docs/feature-parity.md#sources-and-counting). This repository retains the
+[matrix source inventory](feature-parity.md#sources-and-counting). This repository retains the
 [MIT license](LICENSE). Upstream desktop game reports remain in
 [COMPATIBILITY.md](COMPATIBILITY.md); they are not Android device-test results.
 
