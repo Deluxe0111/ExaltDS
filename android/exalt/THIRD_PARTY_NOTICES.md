@@ -17,6 +17,7 @@ own copy.
 | [Zstandard](https://github.com/facebook/zstd) 1.5.7 | `libzstd_1.so` (renamed from libzstd.so.1) | BSD-3-Clause |
 | [libxml2](https://gitlab.gnome.org/GNOME/libxml2) 2.15.4 | `libxml2_16.so` (renamed from libxml2.so.16) | MIT |
 | [GNU libiconv](https://www.gnu.org/software/libiconv/) 1.19.1 | `libiconv.so`, `libcharset.so` | LGPL-2.1-or-later |
+| [FFmpeg](https://ffmpeg.org) 7.1.1 | HD cutscene import's video decoding: `libavformat.so`, `libavcodec.so`, `libavfilter.so`, `libswscale.so`, `libavutil.so` (used through `libexalt_ffmpeg.so`, `crates/zakuro-android/ffmpeg/hdmovies.c`, MIT) | LGPL-2.1-or-later (`assets/licenses/FFMPEG.txt`) |
 | [libandroid-glob](https://github.com/termux/termux-packages/tree/master/packages/libandroid-glob) 0.6 | `libandroid-glob.so` | BSD-3-Clause |
 
 The compiler's libraries are Termux's packages (`android/exalt/clang-kit.py` lists them with their
@@ -32,3 +33,9 @@ Each Rust crate ExaltDS links keeps its own license; `Cargo.lock` lists them.
 
 Fire Emblem is a trademark of Nintendo. ExaltDS is not affiliated with Nintendo or Intelligent
 Systems.
+
+
+FFmpeg is under the LGPL: its libraries are shipped as their own shared libraries, built unmodified
+from <https://ffmpeg.org/releases/ffmpeg-7.1.1.tar.xz> by `android/scripts/build-ffmpeg.sh` (which gives
+the configure options; `assets/licenses/FFMPEG.txt` repeats them with the license), and can be replaced.
+ExaltDS ships no video: HD cutscenes are made on the device from the player's own video and game file.

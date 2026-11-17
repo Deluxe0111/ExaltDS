@@ -5,6 +5,7 @@
 <p align="center">
   <a href="https://github.com/teton-dev/ExaltDS/releases">Download</a> ·
   <a href="#recall-fate">Recall Fate</a> ·
+  <a href="#hd-cutscenes-experimental">HD cutscenes</a> ·
   <a href="#install">Install</a> ·
   <a href="#where-its-going">Roadmap</a>
 </p>
@@ -50,6 +51,28 @@ A short scene between Robin and Chrom introduces it the first time you reach the
 Recall Fate (Naga's Tear) is on by default. You can turn it off during setup, or later in the sidebar (this needs a restart).
 It's still experimental, so keep regular saves as you normally would.
 
+## HD cutscenes (experimental)
+
+Awakening's anime cutscenes are 400×240 video on the 3DS. If you have your own HD copy of them, such as a rip of the
+*Fire Emblem: HD Movie Collection* Blu-ray (from Japan's *Valentia Complete* set) or another recording, ExaltDS can
+play your HD version in their place. The 3D cutscenes stay as they are.
+
+- **Nothing is included.** ExaltDS ships no cutscenes, video files or pictures from the game. It only uses the video you
+  choose and your own game file.
+- **Import once.** In the sidebar, open **Mods / textures**, choose **HD movies from your video…** and pick the video.
+  ExaltDS decodes the game's own movies from your copy and searches your video for each of the 14. It finds where each
+  one starts, any black bars, how the picture is framed, the frame rate and the brightness, then matches it to the game
+  frame by frame. It then renders the matched frames into HD clips on your device, with the device's own video
+  encoder, and checks each clip. On the AYN Thor this takes about 8 minutes for a 15-minute video. Then use **Apply and
+  restart**.
+- **While you play,** ExaltDS recognises each frame of a movie as the game plays it and draws your HD frame of the same
+  moment over it. The game's own sound and subtitles stay. Anything your video doesn't have, such as a missing movie or
+  a fade added by whoever recorded it, plays as the original.
+- **What video works:** one file holding the movies, in any order. It can have intros or other footage between them,
+  and some movies can be missing. MP4, MKV, TS or AVI with H.264, HEVC, MPEG-2 or VP9 video, progressive or interlaced.
+- **Experimental.** It has been tested on the AYN Thor with a 1080p recording. Disc rips (interlaced or 23.976 fps)
+  haven't been tested yet. The HD clips take about 0.6 GB; **Remove HD movies…** deletes them.
+
 ## Clean, bright 3D
 
 The game's glow effect adds a haze around bright areas, and at higher resolutions it gets heavier. The **No glow**
@@ -63,6 +86,7 @@ option removes it, so characters and grass stay crisp without a halo and without
 - **Feet on the ground:** the feet mod from the
   [Fire Emblem: Awakening recompilation project](https://github.com/Zelkin1/fe-awakening-recomp), built from your copy.
 - **HD texture packs**, if you have one (not included).
+- **HD cutscenes** from your own video (experimental, not included). See [above](#hd-cutscenes-experimental).
 - **A sidebar** (press Back in game) with save states, Quick Save and Quick Load, a performance monitor, a clock, mods,
   and GPU drivers.
 - **Updates from inside the app.**
@@ -108,6 +132,8 @@ nothing else.
 ExaltDS is built from this repository (a fork of [Zakuroishi](https://github.com/Sekyleky/Zakuroishi), whose own
 README is [docs/zakuroishi.md](docs/zakuroishi.md)) on Windows with `android/scripts/build-windows.ps1 -Flavor exalt`,
 the Android SDK and NDK r30, a JDK and Rust 1.95. The on-device compiler comes from `android/exalt/clang-kit.py`.
+HD cutscene import needs FFmpeg for Android: build it with `android/scripts/build-ffmpeg.sh` and pass its folder to
+`build-windows.ps1` as `-FFmpeg <folder>`.
 
 ## Credits and licenses
 
@@ -115,7 +141,8 @@ ExaltDS is built on [Zakuroishi](https://github.com/Sekyleky/Zakuroishi) and [Za
 (MIT), with game code recompiled by [3dsrecomp](https://github.com/fearkov/3dsrecomp) (MIT). The feet mod is from the
 [Fire Emblem: Awakening recompilation project](https://github.com/Zelkin1/fe-awakening-recomp) (MIT). The on-device
 compiler is [LLVM/Clang](https://llvm.org) (Apache-2.0 with LLVM exceptions), as built for Android by
-[Termux](https://github.com/termux/termux-packages). All notices, including the libraries the compiler needs, are in
+[Termux](https://github.com/termux/termux-packages). HD cutscene import decodes video with [FFmpeg](https://ffmpeg.org)
+(LGPL-2.1-or-later, shipped as its own unmodified libraries). All notices, including the libraries the compiler needs, are in
 [`android/exalt/THIRD_PARTY_NOTICES.md`](android/exalt/THIRD_PARTY_NOTICES.md) and in the app.
 
 Not affiliated with Nintendo or Intelligent Systems. Fire Emblem is a trademark of Nintendo.
