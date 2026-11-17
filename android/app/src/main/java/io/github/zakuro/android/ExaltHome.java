@@ -23,7 +23,8 @@ public final class ExaltHome extends Activity {
     private LinearLayout actions;
     private boolean busy, setupOpen;
     private Uri game, dlc;
-    private boolean naga;
+    /** Naga's Tear is on unless the player unticks it */
+    private boolean naga = true;
 
     @Override protected void onCreate(Bundle state) {
         super.onCreate(state);
@@ -244,7 +245,8 @@ public final class ExaltHome extends Activity {
         boolean n = naga;
         run("Starting setup…", () -> {
             ExaltSetup.run(getApplicationContext(), g, d, n, text -> runOnUiThread(() -> status.setText(text)));
-            return "The game is set up. Press Play; the sidebar (Back in game) has the settings, mods and textures.";
+            return "The game is set up. Press Play; the sidebar (Back in game) has the settings, mods and textures."
+                    + (n ? "\n\nNaga's Tear is on (experimental): you'll receive it the next time you enter the world map." : "");
         });
     }
 

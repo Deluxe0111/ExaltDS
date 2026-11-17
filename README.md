@@ -33,8 +33,8 @@ ExaltDS contains **no game files**. You need your own legally obtained, decrypte
 1. Download the latest APK from the [Releases page](https://github.com/teton-dev/ExaltDS/releases).
 2. Install it. Later versions update from the sidebar (**Check for updates**); install over the app, **don't uninstall
    first** or you lose your saves.
-3. Open ExaltDS, choose your game file and, if you have it, the DLC file. Tick **Naga's Tear** if you want it, then
-   **Set up**.
+3. Open ExaltDS, choose your game file and, if you have it, the DLC file. **Naga's Tear** is on by default; untick it if
+   you don't want it. Then press **Set up**.
 4. Setup copies the game into the app, builds the feet and Naga's Tear from it and recompiles the game's code for your
    device. On the AYN Thor this takes about 5 minutes; keep ExaltDS open and the device charging. Your saves are kept,
    and you can delete your own copy of the game file afterwards.
@@ -44,7 +44,7 @@ ExaltDS contains **no game files**. You need your own legally obtained, decrypte
 
 When you turn it on, Robin and Chrom find Naga's Tear the next time you enter the world map. From then on, **Recall
 Fate** in the battle map menu lists every turn and action of the battle; choose one to return to just before it. It is
-experimental. It is a box in setup; turning it on or off later, in the sidebar, needs a restart (Apply and restart).
+experimental and on by default (a box in setup); turning it on or off later, in the sidebar, needs a restart (Apply and restart).
 
 ## Privacy
 
