@@ -24,7 +24,7 @@ import java.util.*;
  * frame rate, 16:9, feet, resolution, HD textures, mods and the GPU driver.
  */
 final class Sidebar {
-    static final int PICK_MOD = 0x5100, PICK_DRIVER = 0x5101, PICK_CODE = 0x5102;
+    static final int PICK_MOD = 0x5100, PICK_DRIVER = 0x5101, PICK_CODE = 0x5102, PICK_ZIP = 0x5103, EXPORT_SAVES = 0x5104, IMPORT_SAVES = 0x5105;
     private static final String[] COMBAT = {"30 fps (original)", "60 fps, original speed", "60 fps, faster"};
     private static final String[] PERF = {"Off", "FPS", "FPS + frame time", "FPS + frame time + temps"};
 
@@ -250,6 +250,8 @@ final class Sidebar {
         main.addView(row("Quick Load", v -> { close(true); game.confirmLoad(); }));
         main.addView(row("Save to slot…", v -> { close(true); game.slotMenu(true); }));
         main.addView(row("Load from slot…", v -> { close(true); game.slotMenu(false); }));
+        main.addView(row("Export saves…", v -> exportSaves()));
+        main.addView(row("Import saves…", v -> importSaves()));
         main.addView(divider());
 
         // performance monitor: live
@@ -375,9 +377,11 @@ final class Sidebar {
         mods.addView(modsStatus);
         modsList = column();
         mods.addView(modsList);
-        mods.addView(row("Import mod or texture pack…", v -> pick(PICK_MOD)));
+        mods.addView(row("Import from ZIP…", v -> pick(PICK_ZIP)));
+        mods.addView(row("Import from folder…", v -> pick(PICK_MOD)));
         mods.addView(row("Remove a mod…", v -> removeMod()));
-        TextView note = text("Choose a folder. A mod holds a romfs folder (like the feet mod); a texture pack holds PNG pictures and replaces the current pack. Changes apply after Apply and restart.", 12, Exalt.MUTED);
+        mods.addView(row("Remove texture pack…", v -> removePack()));
+        TextView note = text("Choose ZIPs as downloaded (several at once is fine) or an extracted folder. A mod holds a romfs folder (like the feet mod); a texture pack holds PNG pictures and is added to the installed pack. Changes apply after Apply and restart.", 12, Exalt.MUTED);
         note.setPadding(px(20), px(8), px(20), px(12));
         mods.addView(note);
     }
@@ -464,24 +468,95 @@ final class Sidebar {
         Intent intent = request == PICK_MOD
                 ? new Intent(Intent.ACTION_OPEN_DOCUMENT_TREE).addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION | Intent.FLAG_GRANT_PREFIX_URI_PERMISSION)
                 : new Intent(Intent.ACTION_OPEN_DOCUMENT).setType(request == PICK_CODE ? "*/*" : "application/zip").addCategory(Intent.CATEGORY_OPENABLE).addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION);
+        if (request == PICK_ZIP) // some file managers label ZIPs differently; packs come split over several ZIPs
+            intent.putExtra(Intent.EXTRA_MIME_TYPES, new String[]{"application/zip", "application/x-zip-compressed", "application/x-zip"})
+                    .putExtra(Intent.EXTRA_ALLOW_MULTIPLE, true);
         try { game.startActivityForResult(intent, request); }
         catch (android.content.ActivityNotFoundException e) { toast("No file picker is available."); }
     }
 
+    private void exportSaves() {
+        Intent intent = new Intent(Intent.ACTION_CREATE_DOCUMENT).setType("application/zip").addCategory(Intent.CATEGORY_OPENABLE)
+                .putExtra(Intent.EXTRA_TITLE, "ExaltDS-saves.zip");
+        try { game.startActivityForResult(intent, EXPORT_SAVES); }
+        catch (android.content.ActivityNotFoundException e) { toast("No file picker is available."); }
+    }
+
+    private void importSaves() {
+        Intent intent = new Intent(Intent.ACTION_OPEN_DOCUMENT).setType("*/*").addCategory(Intent.CATEGORY_OPENABLE)
+                .putExtra(Intent.EXTRA_MIME_TYPES, new String[]{"application/zip", "application/x-zip-compressed", "application/x-zip", "application/octet-stream"});
+        try { game.startActivityForResult(intent, IMPORT_SAVES); }
+        catch (android.content.ActivityNotFoundException e) { toast("No file picker is available."); }
+    }
+
+    /** Writes the in-game saves (the game is paused, and holds the save lock itself) to the chosen ZIP. */
+    private void exportTo(Uri uri) {
+        busy = true;
+        toast("Exporting saves…");
+        new Thread(() -> {
+            String message;
+            try (java.io.OutputStream out = game.getContentResolver().openOutputStream(uri, "w")) {
+                if (out == null) throw new java.io.IOException("Cannot write the chosen file.");
+                SaveArchive.exportZip(game.getFilesDir(), id, out);
+                message = "Saves exported.";
+            } catch (Exception e) { message = "Export failed: " + e.getMessage(); }
+            String done = message;
+            game.runOnUiThread(() -> { busy = false; toast(done); });
+        }, "exalt-saves").start();
+    }
+
+    /** Copies the chosen ZIP aside; Game.prepareSaves restores it at the next start, before the game opens any save. */
+    private void importFrom(Uri uri) {
+        busy = true;
+        new Thread(() -> {
+            String error = null;
+            try (java.io.InputStream in = game.getContentResolver().openInputStream(uri)) {
+                if (in == null) throw new java.io.IOException("Cannot read the chosen file.");
+                java.io.File pending = Game.pendingSaves(game);
+                try (java.io.FileOutputStream out = new java.io.FileOutputStream(pending)) {
+                    byte[] buffer = new byte[65536]; long total = 0; int n;
+                    while ((n = in.read(buffer)) > 0) {
+                        total += n;
+                        if (total > SaveArchive.MAX_ZIP_BYTES) { pending.delete(); throw new java.io.IOException("This file is too large to be a save export."); }
+                        out.write(buffer, 0, n);
+                    }
+                }
+            } catch (Exception e) { error = e.getMessage(); }
+            String failed = error;
+            game.runOnUiThread(() -> {
+                busy = false;
+                if (failed != null) { toast("Import failed: " + failed); return; }
+                new android.app.AlertDialog.Builder(game).setTitle("Import saves?")
+                        .setMessage("Your current in-game saves are replaced (a recovery copy is kept) and the game restarts. Save states are not touched.")
+                        .setPositiveButton("Import and restart", (d, w) -> { close(true); game.relaunch(); })
+                        .setNegativeButton("Cancel", (d, w) -> Game.pendingSaves(game).delete())
+                        .setOnCancelListener(d -> Game.pendingSaves(game).delete()).show();
+            });
+        }, "exalt-saves").start();
+    }
+
     /** True when the result was one of the sidebar's pickers. */
     boolean result(int request, int code, Intent data) {
-        if (request != PICK_MOD && request != PICK_DRIVER && request != PICK_CODE) return false;
-        if (code != android.app.Activity.RESULT_OK || data == null || data.getData() == null || busy) return true;
-        Uri uri = data.getData();
+        if (request == EXPORT_SAVES || request == IMPORT_SAVES) {
+            if (code == android.app.Activity.RESULT_OK && data != null && data.getData() != null && !busy) {
+                if (request == EXPORT_SAVES) exportTo(data.getData()); else importFrom(data.getData());
+            }
+            return true;
+        }
+        if (request != PICK_MOD && request != PICK_ZIP && request != PICK_DRIVER && request != PICK_CODE) return false;
+        if (code != android.app.Activity.RESULT_OK || data == null || busy) return true;
+        List<Uri> uris = new ArrayList<>();
+        if (data.getClipData() != null) for (int i = 0; i < data.getClipData().getItemCount(); i++) uris.add(data.getClipData().getItemAt(i).getUri());
+        else if (data.getData() != null) uris.add(data.getData());
+        if (uris.isEmpty()) return true;
         busy = true;
-        toast(request == PICK_MOD ? "Importing…" : request == PICK_CODE ? "Replacing native game code…" : "Importing driver…");
-        if (modsStatus != null && request == PICK_MOD) modsStatus.setText("Importing…");
+        if (request == PICK_MOD || request == PICK_ZIP) { importNext(uris, 0, request == PICK_ZIP, new ArrayList<>()); return true; }
+        Uri uri = uris.get(0);
+        toast(request == PICK_CODE ? "Replacing native game code…" : "Importing driver…");
         new Thread(() -> {
             String message;
             try {
-                if (request == PICK_MOD) message = Exalt.importFolder(game, id, uri, (bytes, files, name) ->
-                        game.runOnUiThread(() -> { if (modsStatus != null) modsStatus.setText(String.format(Locale.ROOT, "Importing… %.1f MB, %d files", bytes / 1048576.0, files)); }));
-                else if (request == PICK_CODE) { GameImport.replaceCode(game, id, uri, (bytes, files, name) -> { }); message = "Native game code replaced. Apply and restart to use it."; }
+                if (request == PICK_CODE) { GameImport.replaceCode(game, id, uri, (bytes, files, name) -> { }); message = "Native game code replaced. Apply and restart to use it."; }
                 else { Launcher.installDriver(game, id, uri); message = "Driver imported and selected."; }
             } catch (Exception e) { message = "Import failed: " + e.getMessage(); }
             String done = message;
@@ -489,12 +564,101 @@ final class Sidebar {
                 busy = false;
                 s = GameSettings.load(game, id); // the driver import saved its choice itself
                 if (request == PICK_CODE && !done.startsWith("Import failed")) modsChanged = true; // shows Apply and restart
-                if (request == PICK_MOD && !done.startsWith("Import failed")) { modsChanged = true; if (done.startsWith("Texture")) { s.textures = true; save(); } }
                 toast(done);
-                if (open) { if (request == PICK_MOD) refreshMods(); else refreshDrivers(); refreshApply(); }
+                if (open) { refreshDrivers(); refreshApply(); }
             });
         }, "exalt-import").start();
         return true;
+    }
+
+    private void importStatus(String text) { game.runOnUiThread(() -> { if (modsStatus != null) modsStatus.setText(text); }); }
+    private static String part(List<Uri> uris, int at) { return uris.size() > 1 ? " (" + (at + 1) + " of " + uris.size() + ")" : ""; }
+    private GameImport.Progress progress(String part) {
+        return (bytes, files, name) -> importStatus(String.format(Locale.ROOT, "Importing%s… %.1f MB, %d files", part, bytes / 1048576.0, files));
+    }
+
+    /**
+     * Imports the picked folder or ZIPs one after another (a pack split over several ZIPs adds up). When a texture pack
+     * has pictures for textures the installed pack already has, asks whether to overwrite those or skip them.
+     */
+    private void importNext(List<Uri> uris, int at, boolean zip, List<String> messages) {
+        if (at >= uris.size()) {
+            busy = false;
+            s = GameSettings.load(game, id);
+            boolean any = false;
+            for (String m : messages) if (!m.startsWith("Import failed") && !m.startsWith("Skipped") && !m.startsWith("Nothing")) any = true;
+            if (any) { modsChanged = true; if (hasPack() && !s.textures) { s.textures = true; save(); } }
+            toast(String.join("\n", messages));
+            if (open) { refreshMods(); refreshApply(); }
+            return;
+        }
+        String part = part(uris, at);
+        importStatus("Checking" + part + "…");
+        new Thread(() -> {
+            Exalt.Picked picked = null;
+            try {
+                picked = Exalt.pick(game, id, uris.get(at), zip, progress(part));
+                if (picked.done != null) { messages.add(picked.done); next(uris, at, zip, messages); return; }
+                Exalt.Picked pack = picked; picked = null; // closed once added or cancelled
+                if (pack.pack.clashing.isEmpty()) addPack(pack, false, uris, at, zip, messages);
+                else game.runOnUiThread(() -> askClashes(pack, uris, at, zip, messages));
+            } catch (Exception e) {
+                messages.add("Import failed" + part + ": " + e.getMessage());
+                next(uris, at, zip, messages);
+            } finally { if (picked != null) picked.close(); }
+        }, "exalt-import").start();
+    }
+    private void next(List<Uri> uris, int at, boolean zip, List<String> messages) {
+        game.runOnUiThread(() -> importNext(uris, at + 1, zip, messages));
+    }
+
+    /** Adds a checked texture pack on a background thread, then goes on with the next pick. */
+    private void addPack(Exalt.Picked picked, boolean overwrite, List<Uri> uris, int at, boolean zip, List<String> messages) {
+        String part = part(uris, at);
+        importStatus("Importing" + part + "…");
+        new Thread(() -> {
+            try { messages.add(GameImport.addTextures(game, picked.pack, overwrite, progress(part))); }
+            catch (Exception e) { messages.add("Import failed" + part + ": " + e.getMessage()); }
+            finally { picked.close(); }
+            next(uris, at, zip, messages);
+        }, "exalt-import").start();
+    }
+
+    private void askClashes(Exalt.Picked picked, List<Uri> uris, int at, boolean zip, List<String> messages) {
+        GameImport.TextureImport pack = picked.pack;
+        int clashes = pack.clashing.size(), total = pack.plan.files.size();
+        String name = GameImport.documentName(game.getContentResolver(), uris.get(at));
+        String what = name.isEmpty() ? "This texture pack" : "“" + name + "”";
+        String message = what + " has " + clashes + (clashes == 1 ? " file" : " files") + " (of " + total
+                + ") for textures the installed pack already covers. The game uses one picture per texture.\n\n"
+                + "Overwrite: use this pack's pictures and remove the installed ones.\n"
+                + "Skip: keep the installed pictures and add only the " + (total - clashes) + " new files.";
+        boolean[] chosen = {false};
+        AlertDialog d = new AlertDialog.Builder(game, game.palette().dialogTheme()).setTitle("Some pictures are already installed")
+                .setMessage(message)
+                .setPositiveButton("Overwrite", (x, w) -> { chosen[0] = true; addPack(picked, true, uris, at, zip, messages); })
+                .setNeutralButton("Skip", (x, w) -> { chosen[0] = true; addPack(picked, false, uris, at, zip, messages); })
+                .setNegativeButton("Cancel", null).create();
+        d.setOnDismissListener(x -> {
+            if (chosen[0]) return;
+            picked.close();
+            messages.add("Skipped " + (name.isEmpty() ? "the texture pack" : name) + ": cancelled.");
+            importNext(uris, at + 1, zip, messages);
+        });
+        d.show(); game.palette().dialog(d, false);
+    }
+
+    private void removePack() {
+        if (!hasPack()) { toast("No texture pack is installed."); return; }
+        AlertDialog d = new AlertDialog.Builder(game, game.palette().dialogTheme()).setTitle("Remove texture pack")
+                .setMessage("Remove every imported HD picture? Import the pack again to get them back.")
+                .setPositiveButton("Remove", (x, w) -> {
+                    try { GameImport.removeTextures(game, id); s.textures = false; save(); modsChanged = true; toast("Texture pack removed."); }
+                    catch (Exception e) { toast("Could not remove the pack: " + e.getMessage()); }
+                    refreshMods(); refreshApply();
+                })
+                .setNegativeButton("Cancel", null).create();
+        d.show(); game.palette().dialog(d, false);
     }
 
     // ---- widgets (after Somniel's skin, in ExaltDS colours) ----

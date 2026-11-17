@@ -42,6 +42,12 @@ final class ImportPlan {
         this.titleId = titleId; this.rom = rom; this.code = code;
         this.files = Collections.unmodifiableList(new ArrayList<>(files)); this.bytes = bytes;
     }
+    /** The same plan with only the files keep accepts (a texture pack added without the pictures already installed). */
+    ImportPlan only(java.util.function.Predicate<Item> keep) {
+        List<Item> kept = new ArrayList<>(); long total = 0;
+        for (Item item : files) if (keep.test(item)) { kept.add(item); total += item.source.size; }
+        return new ImportPlan(titleId, rom, code, kept, total);
+    }
     void checkDestination(File stage) throws IOException {
         String root = stage.getCanonicalPath() + File.separator;
         for (Item item : files) {
@@ -168,7 +174,7 @@ final class ImportPlan {
                 catch (ArithmeticException e) { throw new IOException("Texture pack is too large", e); }
             }
         }
-        if (!hasPng) throw new IOException("No PNG images found. Select the extracted texture pack folder.");
+        if (!hasPng) throw new IOException("No PNG images found. Select the texture pack's folder or ZIP.");
         return new ImportPlan(titleId, null, null, files, total);
     }
     /** A Luma3DS/Citra mod folder: its romfs and romfs_ext trees and code patches, laid over the game at launch. */
@@ -216,7 +222,7 @@ final class ImportPlan {
             level = next;
         }
         if (other) throw new IOException("This folder only has mods for other games, not game " + titleId + ".");
-        throw new IOException(zip ? "No romfs folder or code patch found. Extract the ZIP first, then select the extracted folder."
+        throw new IOException(zip ? "No romfs folder or code patch found. If the mod is in a ZIP inside this folder, import that ZIP."
                 : "No romfs folder or code patch found. Select the mod's folder that contains them.");
     }
     /** rootName is the picked folder's name: a folder that is itself romfs or romfs_ext is taken as that tree. */

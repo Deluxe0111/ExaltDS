@@ -12,7 +12,8 @@
 //!
 //! - The trigger is data too: `Command.cmb` also gets `bev::GMAP_ON_<chapter>` for every chapter
 //!   script without an arrival scene of its own (all but 004, 007, 010, 011), each running
-//!   `bev::NagaTear`. Arriving on the world map the game starts that name itself (0x1C29B8), so the
+//!   `bev::NagaTear`; those four scripts get the same call in front of their own scene, so wherever
+//!   the player is, the first arrival on the world map grants it. Arriving on the world map the game starts that name itself (0x1C29B8), so the
 //!   scene plays on the first arrival after the layer is turned on. No title.so code is involved.
 //!   (A first version started it from a title.so override of 0x399E58; it crashed the first
 //!   arrival and was dropped, 2026-11-16.)
@@ -139,6 +140,19 @@ pub fn command_script(original: &[u8], arrivals: &[String]) -> Result<Vec<u8>, S
     script.write_rebased(original).map_err(|e| format!("Command.cmb: {e}"))
 }
 
+/// A chapter script that has an arrival scene of its own (004, 007, 010, 011) with `bev::NagaTear` run at the
+/// start of that scene, so the first world-map arrival grants Naga's Tear there too. Jumps are relative, so
+/// the code in front of the scene's own moves nothing.
+pub fn chapter_script(original: &[u8], chapter: &str) -> Result<Vec<u8>, String> {
+    let mut script = cmb::Script::parse(original).map_err(|e| format!("{chapter}.cmb: {e}"))?;
+    let at = script.find(arrival_name(chapter).as_bytes()).ok_or(format!("{chapter}.cmb has no arrival scene"))?;
+    let mut code = cmb::Code::new(&mut script);
+    code.run(FUNCTION, 0);
+    let prefix = code.bytes;
+    script.functions[at].code.splice(0..0, prefix);
+    script.write_rebased(original).map_err(|e| format!("{chapter}.cmb: {e}"))
+}
+
 pub fn arrival_name(chapter: &str) -> String {
     format!("bev::GMAP_ON_{chapter}")
 }
@@ -173,6 +187,7 @@ pub fn gmap_messages(original: &[u8]) -> Result<Vec<u8>, String> {
 pub fn build(files: &[String], read: &dyn Fn(&str) -> Result<Vec<u8>, String>, out: &Path) -> Result<(), String> {
     // the chapters whose script has no arrival scene of its own
     let mut arrivals = Vec::new();
+    let mut own = Vec::new(); // chapters with a scene of their own: the call goes in front of it
     for path in files {
         let Some(chapter) = path.strip_prefix("scripts/").and_then(|p| p.strip_suffix(".cmb")) else { continue };
         if !is_chapter_script(chapter) {
@@ -181,6 +196,8 @@ pub fn build(files: &[String], read: &dyn Fn(&str) -> Result<Vec<u8>, String>, o
         let script = cmb::Script::parse(&read(path)?).map_err(|e| format!("{path}: {e}"))?;
         if script.find(arrival_name(chapter).as_bytes()).is_none() {
             arrivals.push(chapter.to_string());
+        } else {
+            own.push(chapter.to_string());
         }
     }
     arrivals.sort();
@@ -206,6 +223,24 @@ pub fn build(files: &[String], read: &dyn Fn(&str) -> Result<Vec<u8>, String>, o
         let file = romfs.join(path);
         std::fs::create_dir_all(file.parent().unwrap()).map_err(|e| e.to_string())?;
         std::fs::write(&file, bytes).map_err(|e| format!("{}: {e}", file.display()))?;
+        println!("{} ({} bytes)", file.display(), bytes.len());
+    }
+    for chapter in &own {
+        let path = format!("scripts/{chapter}.cmb");
+        let bytes = chapter_script(&read(&path)?, chapter)?;
+        let parsed = cmb::Script::parse(&bytes).map_err(|e| format!("{path}: {e}"))?;
+        let at = parsed.find(arrival_name(chapter).as_bytes()).ok_or(format!("{path}: arrival scene missing after writing"))?;
+        if !parsed.functions[at].code.starts_with(&{
+            let mut s = cmb::Script::parse(&bytes).map_err(|e| e.to_string())?;
+            let mut c = cmb::Code::new(&mut s);
+            c.run(FUNCTION, 0);
+            c.bytes
+        }) {
+            return Err(format!("{path}: the call is not in front of the arrival scene"));
+        }
+        let file = romfs.join(&path);
+        std::fs::create_dir_all(file.parent().unwrap()).map_err(|e| e.to_string())?;
+        std::fs::write(&file, &bytes).map_err(|e| format!("{}: {e}", file.display()))?;
         println!("{} ({} bytes)", file.display(), bytes.len());
     }
     for chapter in &arrivals {

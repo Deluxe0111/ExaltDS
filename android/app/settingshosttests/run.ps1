@@ -1,4 +1,4 @@
-param([string]$Sdk = '', [string]$JavaHome = 'C:/Program Files/Android/Android Studio/jbr')
+param([string]$Sdk = '', [string]$JavaHome = 'C:/Program Files/Android/Android Studio/jbr', [string]$Platform = 'android-37.0')
 $ErrorActionPreference = 'Stop'
 if (!$Sdk) { $Sdk = $env:ANDROID_HOME }
 if (!$Sdk) { $Sdk = Join-Path $env:USERPROFILE 'AppData/Local/Android/Sdk' }
@@ -8,7 +8,7 @@ if (!(Test-Path "$JavaHome/bin/javac$exe") -and $env:JAVA_HOME) { $JavaHome = $e
 $repo = (Resolve-Path "$PSScriptRoot/../../..").Path
 $classes = Join-Path $repo 'build/settingshosttests/classes'
 New-Item -ItemType Directory -Force $classes | Out-Null
-$jar = Join-Path $Sdk 'platforms/android-37.0/android.jar'
+$jar = Join-Path $Sdk "platforms/$Platform/android.jar"
 if (!(Test-Path -LiteralPath $jar)) { throw "Android SDK platform missing: $jar" }
 $cp = "$classes$([IO.Path]::PathSeparator)$jar"
 $sources = @(Get-ChildItem "$repo/android/app/src/main/java" -Recurse -Filter '*.java' | ForEach-Object FullName)
@@ -19,6 +19,7 @@ $sources += "$repo/android/app/tests/NativeFixture.java"
 $sources += "$repo/android/app/tests/GameImportCheck.java"
 $sources += "$repo/android/app/tests/ImportPlanCheck.java"
 $sources += "$repo/android/app/tests/NativeLibraryCheck.java"
+$sources += "$repo/android/app/tests/ZipSourceCheck.java"
 & "$JavaHome/bin/javac$exe" --release 11 -classpath $jar -d $classes @sources "$PSScriptRoot/GameSettingsCheck.java" "$PSScriptRoot/SettingsBridgeCheck.java" "$PSScriptRoot/DriverPackageCheck.java"
 if ($LASTEXITCODE -ne 0) { throw 'Java compilation failed' }
 # class name, extra argument, failure text
@@ -30,7 +31,8 @@ $checks = @(
     @('DebugSettingsCheck', $null, 'Debug settings checks failed'),
     @('GameImportCheck', $null, 'Game import checks failed'),
     @('ImportPlanCheck', $null, 'Import plan checks failed'),
-    @('NativeLibraryCheck', $null, 'Native library checks failed')
+    @('NativeLibraryCheck', $null, 'Native library checks failed'),
+    @('ZipSourceCheck', $null, 'ZIP import checks failed')
 )
 foreach ($c in $checks) {
     & "$JavaHome/bin/java$exe" -cp $cp "io.github.zakuro.android.$($c[0])" @(if ($c[1]) { $c[1] })

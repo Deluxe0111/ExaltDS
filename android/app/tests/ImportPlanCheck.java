@@ -434,7 +434,7 @@ public final class ImportPlanCheck {
         rejects(() -> ImportPlan.romfsMod(several, "root", TITLE), "two mods in one folder");
         Tree zip = new Tree(); zip.file("root", "z", "mod.zip", new byte[]{1});
         try { ImportPlan.romfsMod(zip, "root", TITLE); throw new AssertionError("zip accepted"); }
-        catch (IOException e) { check(e.getMessage().contains("Extract the ZIP"), "zip hint missing"); }
+        catch (IOException e) { check(e.getMessage().contains("import that ZIP"), "zip hint missing"); }
         // the picked folder is itself romfs
         Tree bare = new Tree(); bare.directory("root", "d", "data"); bare.file("d", "f", "a.bin", new byte[]{1});
         check(ImportPlan.romfsMod(bare, "root", "RomFS", TITLE).files.get(0).destination.equals("data/mods/" + TITLE + "/romfs/data/a.bin"), "bare romfs folder");

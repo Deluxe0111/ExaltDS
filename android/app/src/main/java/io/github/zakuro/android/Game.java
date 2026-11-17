@@ -455,10 +455,25 @@ public final class Game extends NativeActivity {
             String id = getIntent().getStringExtra("game_id");
             saveGuard = SaveArchive.lock(getFilesDir(), id);
             SaveArchive.recover(getFilesDir(), id);
+            applyPendingSaves(id);
             return null;
         } catch (Exception e) {
             return "Cannot open saves. " + e.getMessage();
         }
+    }
+    static java.io.File pendingSaves(android.content.Context c) { return new java.io.File(c.getFilesDir(), "pending-saves.zip"); }
+    /** A saves ZIP the sidebar's Import saves left; restored under the save lock before any save is opened. A refused file leaves the saves as they were. */
+    private void applyPendingSaves(String id) {
+        java.io.File pending = pendingSaves(this);
+        if (!pending.isFile()) return;
+        String note;
+        try (java.io.InputStream in = new java.io.FileInputStream(pending)) {
+            SaveArchive.restoreZip(getFilesDir(), id, in);
+            note = "Saves imported. Your previous saves are kept as a recovery copy.";
+        } catch (Exception e) { note = "Saves were not imported: " + e.getMessage(); }
+        pending.delete();
+        String shown = note;
+        runOnUiThread(() -> android.widget.Toast.makeText(this, shown, android.widget.Toast.LENGTH_LONG).show());
     }
     private AlertDialog errorDialog;
     @Override public void onCreate(Bundle state) {

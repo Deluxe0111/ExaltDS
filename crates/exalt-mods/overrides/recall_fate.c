@@ -98,7 +98,10 @@
 /* the type-info word and slots 0-32: a map menu item's vtable runs that far (the menu calls slot
    27, +0x6C, as it opens; a shorter copy crashed there), the Yes class's is shorter */
 #define RF_VTABLE_BYTES 0x88u
-#define RF_ALLOCATION (RF_VTABLE_COPY + RF_VTABLE_BYTES)
+#define RF_TITLE (RF_VTABLE_COPY + RF_VTABLE_BYTES) /* UTF-16, the list's title "Recall Fate (N left)" (the
+                                                       map menu entry, which outlives the list, keeps it) */
+#define RF_TITLE_BYTES 0x40u
+#define RF_ALLOCATION (RF_TITLE + RF_TITLE_BYTES)
 #define RF_MAX_ROWS 24
 #define RF_NAME_CHARS 31
 /* the list sits on the left, as tall as the screen allows (rows beyond that scroll), its rows
@@ -193,8 +196,15 @@ static void rf_command(uint8_t kind) {
     if (!command) command = (void (*)(uint8_t))rf_runtime("zakuro_recall_command");
     if (command) command(kind);
 }
+/* Naga's Tear's uses left in this battle (recall.rs: 10 a battle, one per rewind) */
+static uint32_t rf_uses(void) {
+    static uint32_t (*uses)(void);
+    if (!uses) uses = (uint32_t (*)(void))rf_runtime("zakuro_recall_uses");
+    return uses ? uses() : 10;
+}
 #else
 #define rf_log(...) do { } while (0)
+static uint32_t rf_uses(void) { return 10; }
 typedef struct { uint32_t id; uint16_t turn, unit; uint8_t kind, pad[3]; uint32_t person; } RfEntry;
 static size_t rf_entries(RfEntry *out, size_t length) { (void)out; (void)length; return 0; }
 static void rf_go(uint32_t id) { (void)id; }
@@ -282,7 +292,11 @@ RECOMP_OVERRIDE(0x0030071C) {
     if (item) {
         rf_init_item(ctx, item, RF_GUIDE_VTABLE);
         rf_write_text(ctx, item + RF_NAME, "Recall Fate", RF_HELP - RF_NAME);
-        rf_write_text(ctx, item + RF_HELP, "Return to before an earlier action or turn.", RF_TURN - RF_HELP);
+        char help[48];
+        uint32_t uses = rf_uses();
+        if (uses) snprintf(help, sizeof help, "Rewind to an earlier moment. %u/10 left.", (unsigned)uses);
+        else snprintf(help, sizeof help, "No uses left in this battle.");
+        rf_write_text(ctx, item + RF_HELP, help, RF_TURN - RF_HELP);
         rf_log("map menu %08X: Recall Fate item %08X first", menu, item);
         /* the seven move down a word; the list ends one word later, still in the builder's frame */
         for (uint32_t i = 7; i > 0; i--) mem_write32(ctx, list + 4 * i, mem_read32(ctx, list + 4 * (i - 1)));
@@ -315,7 +329,7 @@ RECOMP_OVERRIDE(0x0030071C) {
 RECOMP_OVERRIDE(0x001C92CC) { /* slot 0: state */
     uint32_t self = ctx->r[0];
     if (LIKELY(!rf_mine(ctx, self))) TAIL_CALL(RECOMP_ORIGINAL(0x001C92CC));
-    ctx->r[0] = rf_entries(NULL, 0) ? RF_SHOWN : RF_GREYED;
+    ctx->r[0] = rf_entries(NULL, 0) && rf_uses() ? RF_SHOWN : RF_GREYED;
     RETURN_TO(ctx->r[14]);
 }
 
@@ -340,7 +354,7 @@ RECOMP_OVERRIDE(0x001C9310) { /* slot 12: select, opens the turn list */
     RfEntry entries[RF_MAX_ROWS];
     size_t count = rf_entries(entries, RF_MAX_ROWS);
     if (count > RF_MAX_ROWS) count = RF_MAX_ROWS;
-    if (!count || (mem_read32(ctx, self + 0x30) & 2)) {
+    if (!count || !rf_uses() || (mem_read32(ctx, self + 0x30) & 2)) {
         ctx->r[0] = RF_REFUSED;
         RETURN_TO(link);
     }
@@ -456,8 +470,11 @@ RECOMP_OVERRIDE(0x001C9310) { /* slot 12: select, opens the turn list */
     if (inner) mem_write32(ctx, inner + 0x44, mem_read32(ctx, inner + 0x44) + 1);
     mem_write32(ctx, dialog + 0x4C, (mem_read32(ctx, dialog + 0x4C) | 0x4000000u) & ~RF_CENTRED);
     mem_write32(ctx, dialog + 0x110, 0xC0800000u); /* -4.0f */
+    char title[32];
+    snprintf(title, sizeof title, "Recall Fate (%u left)", (unsigned)rf_uses());
+    rf_write_text(ctx, self + RF_TITLE, title, RF_TITLE_BYTES);
     ctx->r[0] = dialog;
-    ctx->r[1] = self + RF_NAME; /* "Recall Fate" */
+    ctx->r[1] = self + RF_TITLE;
     RF_GUEST_CALL(RF_SET_TITLE, link);
     rf_log("turn list %08X open, %u rows, owner %08X, over %08X (%d open)", dialog, (unsigned)row_count, owner, inner,
            inner ? (int32_t)mem_read32(ctx, inner + 0x44) : 0);

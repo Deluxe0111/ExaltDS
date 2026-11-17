@@ -60,7 +60,7 @@ final class GameImport {
     static void mkdir(File file) throws IOException {
         if (!file.isDirectory() && !file.mkdirs()) throw new IOException("Cannot create " + file.getName());
     }
-    private static final class DocumentsSource implements ImportPlan.Source {
+    static final class DocumentsSource implements ImportPlan.Source {
         final ContentResolver resolver;
         final Uri tree;
         DocumentsSource(ContentResolver resolver, Uri tree) { this.resolver = resolver; this.tree = tree; }
@@ -83,6 +83,20 @@ final class GameImport {
         public SeekableByteChannel open(String id) throws IOException {
             return openDocument(resolver, DocumentsContract.buildDocumentUriUsingTree(tree, id));
         }
+    }
+    /** A picked ZIP, read in place (large deflated entries are inflated into the app's cache, one at a time). */
+    static ZipSource openZip(android.content.Context context, Uri uri) throws IOException {
+        SeekableByteChannel channel = openDocument(context.getContentResolver(), uri);
+        if (!(channel instanceof java.nio.channels.FileChannel)) { channel.close(); throw new IOException("Cannot read this ZIP directly. Copy it to device storage first."); }
+        File temp = new File(context.getCacheDir(), "zip-import"); remove(temp); mkdir(temp);
+        try { return new ZipSource((java.nio.channels.FileChannel) channel, temp); }
+        catch (IOException | RuntimeException e) { channel.close(); throw e; }
+    }
+    /** The picked document's name, or "" when the provider gives none. */
+    static String documentName(ContentResolver resolver, Uri uri) {
+        try (Cursor cursor = resolver.query(uri, new String[]{android.provider.OpenableColumns.DISPLAY_NAME}, null, null, null)) {
+            return cursor != null && cursor.moveToFirst() && !cursor.isNull(0) ? cursor.getString(0) : "";
+        } catch (Exception ignored) { return ""; }
     }
     private static SeekableByteChannel openDocument(ContentResolver resolver, Uri uri) throws IOException {
         ParcelFileDescriptor descriptor = resolver.openFileDescriptor(uri, "r");
@@ -299,6 +313,80 @@ final class GameImport {
         DocumentsSource source = new DocumentsSource(context.getContentResolver(), tree);
         ImportPlan plan = ImportPlan.texturePack(source, DocumentsContract.getTreeDocumentId(tree), id);
         return swapIn(context, id, version, source, plan, progress, false, 0, false, "textures");
+    }
+    /**
+     * A texture pack checked and ready to add to the game's pack (ExaltDS): which of its pictures replace textures the
+     * installed pack already has. Nothing is written until {@link #addTextures}.
+     */
+    static final class TextureImport {
+        final String id; final File version; final ImportPlan.Source source; final ImportPlan plan;
+        /** the plan's files whose texture the installed pack already has, and those textures' keys (PackMerge.key) */
+        final Set<ImportPlan.Item> clashing = new HashSet<>(); final Set<String> clashKeys = new HashSet<>();
+        final boolean installed;
+        int pictures;
+        TextureImport(String id, File version, ImportPlan.Source source, ImportPlan plan, boolean installed) {
+            this.id = id; this.version = version; this.source = source; this.plan = plan; this.installed = installed;
+        }
+    }
+    private static String packPath(ImportPlan.Item item, String id) {
+        return item.destination.substring(("data/mods/" + id + "/textures/").length());
+    }
+    static TextureImport inspectTextures(android.content.Context context, String id, ImportPlan.Source source, String rootId) throws Exception {
+        validId(id); File version = active(context, id);
+        ImportPlan plan = ImportPlan.texturePack(source, rootId, id);
+        File pack = new File(version, "data/mods/" + id + "/textures");
+        TextureImport found = new TextureImport(id, version, source, plan, pack.isDirectory());
+        Map<String, List<String>> installed = found.installed ? PackMerge.installed(pack) : Collections.<String, List<String>>emptyMap();
+        for (ImportPlan.Item item : plan.files) {
+            if (item.destination.toLowerCase(Locale.ROOT).endsWith(".png")) found.pictures++;
+            String key = PackMerge.key(packPath(item, id));
+            if (installed.containsKey(key)) { found.clashing.add(item); found.clashKeys.add(key); }
+        }
+        return found;
+    }
+    /**
+     * Adds the pack's pictures to the installed pack (or installs it when there is none). overwrite: a clashing picture
+     * replaces the installed one (which is removed, wherever it was, since the runtime keeps one picture per texture);
+     * otherwise clashing pictures are left out. All or nothing: the merged pack is built beside the old one and swapped in.
+     */
+    static String addTextures(android.content.Context context, TextureImport pack, boolean overwrite, Progress progress) throws Exception {
+        String id = pack.id; File version = pack.version;
+        ImportPlan plan = overwrite ? pack.plan : pack.plan.only(item -> !pack.clashing.contains(item));
+        if (plan.files.isEmpty()) return "Nothing added: the installed pack already has all " + pack.plan.files.size() + " of these files.";
+        File parent = new File(version, "data/mods/" + id), old = new File(parent, "textures");
+        // the old pack is hard-linked into the merged one where the filesystem allows; reserve its size in case it is copied
+        File stage = componentStage(context, plan, old.isDirectory() ? size(old) : 0); boolean[] uncertain = {false};
+        try {
+            copy(pack.source, plan, stage, progress);
+            File staged = new File(stage, "data/mods/" + id), fresh = new File(staged, "textures");
+            if (old.isDirectory()) {
+                File merged = new File(stage, "merged/textures");
+                copyTree(old, merged);
+                if (overwrite) PackMerge.removeKeys(merged, pack.clashKeys);
+                mergeTree(fresh, merged); remove(fresh);
+                Files.move(merged.toPath(), fresh.toPath());
+            }
+            synchronized (POINTER_LOCK) {
+                if (!active(context, id).equals(version)) throw new IOException("The game changed while importing. Select it again.");
+                mkdir(parent);
+                swapParts(staged, parent, new String[]{"textures"}, true, MOVE, uncertain);
+            }
+        } finally { if (!uncertain[0]) remove(stage); }
+        int added = 0;
+        for (ImportPlan.Item item : plan.files) if (item.destination.toLowerCase(Locale.ROOT).endsWith(".png")) added++;
+        int clashes = pack.clashing.size();
+        if (!pack.installed) return "Texture pack imported (" + added + " pictures).";
+        return "Added " + added + " pictures to the texture pack"
+                + (clashes == 0 ? "." : overwrite ? " (" + clashes + " replaced installed ones)." : " (" + clashes + " already installed were skipped).");
+    }
+    /** Removes the game's texture pack (ExaltDS puts the mod layers' pictures back on the next Apply). */
+    static void removeTextures(android.content.Context context, String id) throws IOException {
+        validId(id);
+        synchronized (POINTER_LOCK) {
+            File pack = new File(active(context, id), "data/mods/" + id + "/textures");
+            File gone = new File(pack.getParentFile(), "textures.removed-" + UUID.randomUUID());
+            if (pack.exists()) { Files.move(pack.toPath(), gone.toPath()); remove(gone); }
+        }
     }
     /** The parts of a game's mods folder that mods own; textures are kept apart and never touched here. */
     static final String[] MOD_PARTS = {"romfs", "romfs_ext", "code.ips", "code.bps", "code.bin", "exheader.bin"};

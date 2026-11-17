@@ -148,37 +148,26 @@ final class Exalt {
         setOn(c, id, name, true);
     }
 
-    // ---- importing a mod or a texture pack from a chosen folder ----
+    // ---- importing a mod or a texture pack from a chosen folder or ZIP ----
 
-    private static final class Doc {
-        final String id, name; final boolean dir; final long size;
-        Doc(String id, String name, boolean dir, long size) { this.id = id; this.name = name; this.dir = dir; this.size = size; }
-    }
-
-    private static List<Doc> children(ContentResolver r, Uri tree, String parent) throws IOException {
-        Uri uri = DocumentsContract.buildChildDocumentsUriUsingTree(tree, parent);
-        List<Doc> out = new ArrayList<>();
-        try (Cursor cur = r.query(uri, new String[]{DocumentsContract.Document.COLUMN_DOCUMENT_ID, DocumentsContract.Document.COLUMN_DISPLAY_NAME,
-                DocumentsContract.Document.COLUMN_MIME_TYPE, DocumentsContract.Document.COLUMN_SIZE}, null, null, null)) {
-            if (cur == null) throw new IOException("Cannot read the chosen folder");
-            while (cur.moveToNext()) out.add(new Doc(cur.getString(0), cur.getString(1),
-                    DocumentsContract.Document.MIME_TYPE_DIR.equals(cur.getString(2)), cur.isNull(3) ? -1 : cur.getLong(3)));
-        }
-        return out;
+    /** What a picked folder or ZIP turned out to be: a mod, imported already (done), or a texture pack still to add. */
+    static final class Picked implements java.io.Closeable {
+        String done; GameImport.TextureImport pack; java.io.Closeable source;
+        @Override public void close() { try { if (source != null) source.close(); } catch (IOException ignored) { } }
     }
 
     /** A folder named name (romfs: the mod's files; textures: its pictures) at most depth levels in. */
-    private static Doc findNamed(ContentResolver r, Uri tree, Doc at, int depth, String name) throws IOException {
-        for (Doc d : children(r, tree, at.id)) if (d.dir && d.name.equalsIgnoreCase(name)) return d;
+    private static ImportPlan.Entry findNamed(ImportPlan.Source s, ImportPlan.Entry at, int depth, String name) throws IOException {
+        for (ImportPlan.Entry d : s.children(at.id)) if (d.directory && d.name.equalsIgnoreCase(name)) return d;
         if (depth == 0) return null;
-        for (Doc d : children(r, tree, at.id)) if (d.dir) { Doc found = findNamed(r, tree, d, depth - 1, name); if (found != null) return found; }
+        for (ImportPlan.Entry d : s.children(at.id)) if (d.directory) { ImportPlan.Entry found = findNamed(s, d, depth - 1, name); if (found != null) return found; }
         return null;
     }
 
-    private static boolean hasPng(ContentResolver r, Uri tree, Doc at, int depth) throws IOException {
-        for (Doc d : children(r, tree, at.id)) {
-            if (!d.dir && d.name.toLowerCase(Locale.ROOT).endsWith(".png")) return true;
-            if (d.dir && depth > 0 && hasPng(r, tree, d, depth - 1)) return true;
+    private static boolean hasPng(ImportPlan.Source s, ImportPlan.Entry at, int depth) throws IOException {
+        for (ImportPlan.Entry d : s.children(at.id)) {
+            if (!d.directory && d.name.toLowerCase(Locale.ROOT).endsWith(".png")) return true;
+            if (d.directory && depth > 0 && hasPng(s, d, depth - 1)) return true;
         }
         return false;
     }
@@ -189,51 +178,72 @@ final class Exalt {
         return s.isEmpty() ? "Mod" : s;
     }
 
-    /** Imports the chosen folder: a romfs mod becomes a new layer (switched on), anything holding pictures a texture pack. */
-    static String importFolder(Context c, String id, Uri tree, GameImport.Progress progress) throws Exception {
-        ContentResolver r = c.getContentResolver();
-        String rootId = DocumentsContract.getTreeDocumentId(tree);
-        String rootName = rootId;
-        try (Cursor cur = r.query(DocumentsContract.buildDocumentUriUsingTree(tree, rootId), new String[]{DocumentsContract.Document.COLUMN_DISPLAY_NAME}, null, null, null)) {
-            if (cur != null && cur.moveToFirst()) rootName = cur.getString(0);
-        }
-        Doc root = new Doc(rootId, rootName, true, -1);
-        Doc romfs = rootName.equalsIgnoreCase("romfs") ? root : findNamed(r, tree, root, 2, "romfs");
-        Doc textures = romfs == root ? null : findNamed(r, tree, root, 2, "textures");
-        if (romfs == null) {
-            if (!hasPng(r, tree, root, 6)) throw new IOException("This folder holds neither a romfs folder (a mod) nor PNG pictures (a texture pack).");
-            GameImport.replaceTextures(c, id, tree, progress);
-            return "Texture pack imported.";
-        }
-        String name = safeName(romfs == root ? "Mod" : rootName);
-        File home = layers(c, id); GameImport.mkdir(home);
-        File stage = new File(home, ".import"), target = new File(home, name);
-        GameImport.remove(stage); GameImport.mkdir(stage);
-        long[] done = {0, 0};
+    /**
+     * Opens the chosen folder (zip false) or ZIP: a romfs mod becomes a new layer (switched on) at once; anything holding
+     * pictures is a texture pack, returned checked against the installed pack for the caller to add (GameImport.addTextures).
+     */
+    static Picked pick(Context c, String id, Uri uri, boolean zip, GameImport.Progress progress) throws Exception {
+        Picked picked = new Picked();
         try {
-            copy(r, tree, romfs, new File(stage, "romfs"), done, progress, 0);
-            if (done[1] == 0) throw new IOException("The romfs folder is empty.");
-            if (textures != null) copy(r, tree, textures, new File(stage, "textures"), done, progress, 0);
-            GameImport.remove(target);
-            Files.move(stage.toPath(), target.toPath());
-        } finally { GameImport.remove(stage); }
-        setOn(c, id, name, true);
-        return "Mod “" + name + "” imported (" + done[1] + " files).";
+            ImportPlan.Source source; ImportPlan.Entry root;
+            if (zip) {
+                ZipSource z = GameImport.openZip(c, uri); picked.source = z; source = z;
+                String name = GameImport.documentName(c.getContentResolver(), uri);
+                if (name.toLowerCase(Locale.ROOT).endsWith(".zip")) name = name.substring(0, name.length() - 4);
+                // a ZIP holding one folder (the usual way packs are made): that folder is the root
+                List<ImportPlan.Entry> top = z.children(ZipSource.ROOT);
+                root = top.size() == 1 && top.get(0).directory ? top.get(0) : new ImportPlan.Entry(ZipSource.ROOT, name, true, -1);
+            } else {
+                ContentResolver r = c.getContentResolver();
+                String rootId = DocumentsContract.getTreeDocumentId(uri), rootName = rootId;
+                try (Cursor cur = r.query(DocumentsContract.buildDocumentUriUsingTree(uri, rootId), new String[]{DocumentsContract.Document.COLUMN_DISPLAY_NAME}, null, null, null)) {
+                    if (cur != null && cur.moveToFirst()) rootName = cur.getString(0);
+                }
+                source = new GameImport.DocumentsSource(r, uri);
+                root = new ImportPlan.Entry(rootId, rootName, true, -1);
+            }
+            ImportPlan.Entry romfs = root.name.equalsIgnoreCase("romfs") ? root : findNamed(source, root, 2, "romfs");
+            ImportPlan.Entry textures = romfs == root ? null : findNamed(source, root, 2, "textures");
+            if (romfs == null) {
+                if (!hasPng(source, root, 6)) throw new IOException("This " + (zip ? "ZIP" : "folder") + " holds neither a romfs folder (a mod) nor PNG pictures (a texture pack).");
+                picked.pack = GameImport.inspectTextures(c, id, source, root.id);
+                return picked;
+            }
+            String name = safeName(romfs == root ? "Mod" : root.name);
+            File home = layers(c, id); GameImport.mkdir(home);
+            File stage = new File(home, ".import"), target = new File(home, name);
+            GameImport.remove(stage); GameImport.mkdir(stage);
+            long[] done = {0, 0};
+            try {
+                copy(source, romfs, new File(stage, "romfs"), done, progress, 0);
+                if (done[1] == 0) throw new IOException("The romfs folder is empty.");
+                if (textures != null) copy(source, textures, new File(stage, "textures"), done, progress, 0);
+                GameImport.remove(target);
+                Files.move(stage.toPath(), target.toPath());
+            } finally { GameImport.remove(stage); }
+            setOn(c, id, name, true);
+            picked.done = "Mod “" + name + "” imported (" + done[1] + " files).";
+            picked.close();
+            return picked;
+        } catch (Exception e) { picked.close(); throw e; }
     }
 
-    private static void copy(ContentResolver r, Uri tree, Doc from, File to, long[] done, GameImport.Progress progress, int depth) throws IOException {
+    private static void copy(ImportPlan.Source s, ImportPlan.Entry from, File to, long[] done, GameImport.Progress progress, int depth) throws IOException {
         if (depth > 16) throw new IOException("The mod's folders nest too deeply.");
         GameImport.mkdir(to);
-        byte[] buffer = new byte[1 << 16];
-        for (Doc d : children(r, tree, from.id)) {
-            if (d.name.equals(".") || d.name.equals("..") || d.name.contains("/") || d.name.contains("\\")) throw new IOException("Unsafe name in the mod: " + d.name);
+        java.nio.ByteBuffer buffer = java.nio.ByteBuffer.allocate(1 << 16);
+        for (ImportPlan.Entry d : s.children(from.id)) {
+            ImportPlan.safeName(d.name);
             File out = new File(to, d.name);
-            if (d.dir) { copy(r, tree, d, out, done, progress, depth + 1); continue; }
-            try (java.io.InputStream in = r.openInputStream(DocumentsContract.buildDocumentUriUsingTree(tree, d.id));
-                 java.io.OutputStream o = new java.io.FileOutputStream(out)) {
-                if (in == null) throw new IOException("Cannot read " + d.name);
-                int n;
-                while ((n = in.read(buffer)) > 0) { o.write(buffer, 0, n); done[0] += n; }
+            if (d.directory) { copy(s, d, out, done, progress, depth + 1); continue; }
+            try (java.nio.channels.SeekableByteChannel in = s.open(d.id);
+                 java.io.FileOutputStream o = new java.io.FileOutputStream(out)) {
+                for (;;) {
+                    buffer.clear(); int n = in.read(buffer);
+                    if (n < 0) break;
+                    if (n == 0) throw new IOException("Cannot read " + d.name);
+                    o.write(buffer.array(), 0, n); done[0] += n;
+                }
             }
             done[1]++;
             if (progress != null && done[1] % 16 == 0) progress.update(done[0], (int) done[1], d.name);

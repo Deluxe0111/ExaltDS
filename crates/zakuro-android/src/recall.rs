@@ -27,6 +27,10 @@
 //! that checkpoint and drops everything after it. All of it belongs to one battle: it starts over
 //! when the structure moves (another map) or is gone, or when a save state is loaded.
 //!
+//! Naga's Tear has USES (10) rewinds a battle: each restore takes one, a new battle (the structure
+//! moving) gives them back. Loading a save state keeps the count. title.so reads it with
+//! `zakuro_recall_uses` and greys the menu entry at 0; a request then is refused here too.
+//!
 //! The game asks for a restore from its own map menu: title.so's override
 //! `crates/exalt-mods/overrides/recall_fate.c` reads the entries with
 //! `zakuro_recall_entries` and asks with `zakuro_recall_go` (the older `zakuro_recall_turns` and
@@ -104,6 +108,16 @@ pub struct Entry {
     pub pad: [u8; 3],
     /// the acting unit's person (guest address), 0 for a turn start
     pub person: u32,
+}
+
+/// rewinds a battle
+pub const USES: u32 = 10;
+static USES_LEFT: AtomicU32 = AtomicU32::new(USES);
+
+/// For title.so: the rewinds left in this battle.
+#[no_mangle]
+pub extern "C" fn zakuro_recall_uses() -> u32 {
+    USES_LEFT.load(Ordering::Acquire)
 }
 
 /// what the game's menu reads, newest first
@@ -218,6 +232,8 @@ pub struct Recall {
     watched_units: HashMap<u32, Vec<u32>>,
     watched_mind: Vec<u32>,
     persons_logged: HashSet<u32>,
+    /// a save state was just loaded: the battle seen next is not a new one for the uses
+    state_loaded: bool,
 }
 
 impl Recall {
@@ -243,6 +259,7 @@ impl Recall {
             watched_units: HashMap::new(),
             watched_mind: Vec::new(),
             persons_logged: HashSet::new(),
+            state_loaded: false,
         };
         recall.publish();
         recall
@@ -256,12 +273,20 @@ impl Recall {
             return None;
         }
         if request != 0 && self.checked_title {
-            return Some(if request & TURN_REQUEST != 0 {
+            let left = USES_LEFT.load(Ordering::Acquire);
+            if left == 0 {
+                return Some(Err("Naga's Tear has no uses left in this battle".into()));
+            }
+            let outcome = if request & TURN_REQUEST != 0 {
                 let turn = request as u16;
                 self.recall(system, turn).map(|()| format!("Back to turn {turn}"))
             } else {
                 self.go(system, request - 1)
-            });
+            };
+            return Some(outcome.map(|text| {
+                USES_LEFT.store(left - 1, Ordering::Release);
+                format!("{text} ({}/{USES} uses left)", left - 1)
+            }));
         }
         self.saving(system);
         None
@@ -286,9 +311,14 @@ impl Recall {
             if !self.checkpoints.is_empty() {
                 log::info!("Recall Fate: battle {:08X} -> {battle:08X}, {} checkpoints dropped", self.battle, self.checkpoints.len());
             }
+            // a new battle (not the one a loaded save state reset to 0) gives the uses back
+            if battle != 0 && !self.state_loaded {
+                USES_LEFT.store(USES, Ordering::Release);
+            }
             self.battle = battle;
             self.clear();
         }
+        self.state_loaded = false;
         if battle == 0 {
             return;
         }
@@ -415,6 +445,7 @@ impl Recall {
     /// a save state was loaded: the history so far may be from another time line
     pub fn reset(&mut self) {
         self.battle = 0;
+        self.state_loaded = true;
         self.clear();
     }
 
