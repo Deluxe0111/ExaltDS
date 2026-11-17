@@ -26,8 +26,7 @@ ExaltDS contains **no game files**. You need your own legally obtained, decrypte
 
 - **Made for two screens.** The top and bottom screens use the device's own two displays, with the top screen in
   true 16:9. No letterboxing, no stretching a single window across both.
-- **Native, not emulated.** The game's code is recompiled once, on your device, from your own copy. After that it just
-  runs.
+- **Native, not emulated.** The game's code is recompiled once, on your device, from your own copy. Graphics still translated.
 - **Sharper than the original.** Up to 4× resolution, optional HD texture packs, and a no-glow option so bright
   scenes stay clean instead of washing out.
 - **Smooth.** Cutscenes and in-game attack animations run at 60 fps, at the original speed or faster.
