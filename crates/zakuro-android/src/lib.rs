@@ -20,6 +20,8 @@ mod platform;
 mod pacing;
 #[cfg(any(target_os = "android", test))]
 mod presentation;
+#[cfg(any(target_os = "android", test))]
+mod pages;
 #[cfg(target_os = "android")]
 mod recall;
 #[cfg(target_os = "android")]

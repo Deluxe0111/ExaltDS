@@ -93,6 +93,25 @@ fn images(system: &System) -> Images {
 impl System {
     /// the console as it is, between frames, as a saved state.
     pub fn save_state(&mut self) -> Result<Vec<u8>, String> {
+        let state = self.save_core()?;
+        let mut out = Vec::new();
+        out.extend_from_slice(MAGIC);
+        out.extend_from_slice(&(VERSION.len() as u32).to_le_bytes());
+        out.extend_from_slice(VERSION.as_bytes());
+        out.extend_from_slice(&self.kernel.program_id.to_le_bytes());
+        section(&mut out, &state);
+        let phys = &self.memory.phys;
+        for memory in [&phys.fcram, &phys.vram, &phys.dsp_ram, &phys.axi_wram] {
+            section(&mut out, memory);
+        }
+        Ok(out)
+    }
+
+    /// everything of a saved state but the four memories (FCRAM, VRAM, DSP RAM, AXI WRAM, which
+    /// stay in self.memory.phys, with what the host's GPU drew written back into them), not
+    /// compressed. For a caller that keeps the memories its own way (Recall Fate keeps the pages
+    /// that changed); load_core takes it back with them.
+    pub fn save_core(&mut self) -> Result<Vec<u8>, String> {
         // what the host's GPU drew comes down first, so that memory holds
         // all of it
         let linear_base = self.kernel.linear_base;
@@ -135,26 +154,12 @@ impl System {
             map: self.memory.save_map(),
             console,
         };
-        let state = postcard::to_allocvec(&saved).map_err(|error| format!("the state could not be written, {error}"))?;
-
-        let mut out = Vec::new();
-        out.extend_from_slice(MAGIC);
-        out.extend_from_slice(&(VERSION.len() as u32).to_le_bytes());
-        out.extend_from_slice(VERSION.as_bytes());
-        out.extend_from_slice(&self.kernel.program_id.to_le_bytes());
-        section(&mut out, &state);
-        let phys = &self.memory.phys;
-        for memory in [&phys.fcram, &phys.vram, &phys.dsp_ram, &phys.axi_wram] {
-            section(&mut out, memory);
-        }
-        Ok(out)
+        postcard::to_allocvec(&saved).map_err(|error| format!("the state could not be written, {error}"))
     }
 
     /// puts the console back as a saved state had it. nothing changes when
     /// the state is not one this game and this Zakuro can take.
     pub fn load_state(&mut self, bytes: &[u8]) -> Result<(), String> {
-        self.idle_interrupted(true);
-        self.spin.forget();
         let mut reader = Reader(bytes);
         if reader.take(MAGIC.len())? != MAGIC {
             return Err("it is not a saved state".into());
@@ -168,8 +173,16 @@ impl System {
             return Err("it was saved from another game".into());
         }
         let state = reader.section()?;
-        let saved: Saved = postcard::from_bytes(&state).map_err(|error| format!("the state could not be read, {error}"))?;
         let memories = [reader.section()?, reader.section()?, reader.section()?, reader.section()?];
+        self.load_core(&state, [&memories[0], &memories[1], &memories[2], &memories[3]])
+    }
+
+    /// puts the console back from what save_core gave and the four memories as they were then.
+    /// Nothing changes when they do not fit this console.
+    pub fn load_core(&mut self, state: &[u8], memories: [&[u8]; 4]) -> Result<(), String> {
+        self.idle_interrupted(true);
+        self.spin.forget();
+        let saved: Saved = postcard::from_bytes(state).map_err(|error| format!("the state could not be read, {error}"))?;
         let phys = &self.memory.phys;
         let sizes = [phys.fcram.len(), phys.vram.len(), phys.dsp_ram.len(), phys.axi_wram.len()];
         if memories.iter().zip(sizes).any(|(memory, size)| memory.len() != size) {

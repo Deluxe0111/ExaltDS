@@ -15,9 +15,11 @@
 //! state, whose bit 0 is "has acted": it is set at the very end of an action (after Wait, or after
 //! the combat, its experience and level up), and cleared when the army's phase starts.
 //!
-//! Checkpoints: the whole console (`System::save_state`, the save states' own format) is saved when
-//! a player phase starts and again whenever a player unit's "has acted" bit goes from 0 to 1, the
-//! end of an action and so the moment before the next one. Each action gets an entry: its turn, its
+//! Checkpoints: the console is saved when a player phase starts and again whenever a player unit's
+//! "has acted" bit goes from 0 to 1, the end of an action and so the moment before the next one.
+//! A checkpoint is the console without its memory (`System::save_core`, LZ4) plus its memory as
+//! pages.rs keeps it: whole at a turn's start, then only the 4 KiB pages each action changed. The
+//! newest MAX_TURNS (5) turns are kept; the oldest goes whole. Each action gets an entry: its turn, its
 //! unit, its kind and the checkpoint taken before it. The kind is the unit command last chosen
 //! (title.so reports Attack, Dance, Staff, Items, Pair Up, Separate, Rally, Talk, Visit and Wait
 //! through `zakuro_recall_command`); for Wait or none, what the action changed (attack: an enemy
@@ -30,7 +32,8 @@
 //! `zakuro_recall_entries` and asks with `zakuro_recall_go` (the older `zakuro_recall_turns` and
 //! `zakuro_recall_request` still work); the restore happens after the frame in which it was asked.
 //!
-//! Development switch: `adb shell setprop debug.zakuro.recall_watch 1` (read at launch) also logs
+//! Development switches (read at launch): `adb shell setprop debug.zakuro.recall_turns 2` keeps 2
+//! turns instead of 5; `adb shell setprop debug.zakuro.recall_watch 1` also logs
 //! the structure's first 0x30 bytes whenever they change (the frame counter left out), the player
 //! units' and the mind's words whenever they change, and each player unit's person once.
 
@@ -40,6 +43,8 @@ use std::sync::Mutex;
 
 use zakuro_core::System;
 
+use crate::pages;
+
 const AWAKENING_USA: u64 = 0x0004_0000_000A_0500;
 const BATTLE_INFO: u32 = 0x004D_1850;
 const FLAGS: u32 = 0x4;
@@ -48,7 +53,9 @@ const TURN: u32 = 0xA;
 const PLAYER_PHASE: u16 = 0;
 const IN_CONTROL: u32 = 0x2_0000;
 const CHANGING_PHASE: u32 = 0x8000_0000;
-/// at most this many bytes of checkpoints are kept (the oldest go first)
+/// the turns Recall Fate can go back over (the oldest turn goes first, whole)
+const MAX_TURNS: usize = 5;
+/// and at most this many bytes of checkpoints, however few turns that is
 const MAX_BYTES: usize = 512 << 20;
 const WATCH_WORDS: usize = 0x30 / 4;
 const FRAME_COUNTER_WORD: usize = 0x18 / 4;
@@ -180,7 +187,10 @@ struct Seen {
 struct Checkpoint {
     id: u32,
     turn: u16,
+    /// the console but its memories (System::save_core), LZ4
     state: Vec<u8>,
+    /// its memories: whole, or the pages that changed since the checkpoint before it
+    pages: pages::Pages,
     /// the units when it was taken
     units: HashMap<u32, Seen>,
 }
@@ -195,6 +205,10 @@ pub struct Recall {
     /// whether this battle has been looked at since it appeared
     looked: bool,
     checkpoints: Vec<Checkpoint>,
+    /// MAX_TURNS, or debug.zakuro.recall_turns (1-20) for testing
+    max_turns: usize,
+    /// the page hashes of the newest checkpoint's memories, which the next delta is taken against
+    hashes: Option<pages::Hashes>,
     /// actions, oldest first: (entry, the checkpoint id before it)
     actions: Vec<Entry>,
     next_id: u32,
@@ -218,6 +232,11 @@ impl Recall {
             looked: false,
             checkpoints: Vec::new(),
             actions: Vec::new(),
+            hashes: None,
+            max_turns: crate::platform::system_property(c"debug.zakuro.recall_turns")
+                .and_then(|v| v.trim().parse::<usize>().ok())
+                .filter(|n| (1..=20).contains(n))
+                .unwrap_or(MAX_TURNS),
             next_id: 0,
             units: HashMap::new(),
             watched: [0; WATCH_WORDS],
@@ -256,7 +275,7 @@ impl Recall {
                 self.on = false;
                 return;
             }
-            log::info!("Recall Fate: saving each player phase and action{}", if self.watch { " (and watching the battle)" } else { "" });
+            log::info!("Recall Fate: saving each player phase and action, the last {} turns{}", self.max_turns, if self.watch { " (and watching the battle)" } else { "" });
         }
         let battle = system.memory.peek32(BATTLE_INFO);
         if self.watch {
@@ -322,33 +341,70 @@ impl Recall {
         self.checkpoint(system, turn, "action");
     }
 
+    /// a turn's start keeps the whole memory (a key); an action keeps the pages that changed since
+    /// the checkpoint before it, which is always in the same turn
     fn checkpoint(&mut self, system: &mut System, turn: u16, why: &str) {
         let start = std::time::Instant::now();
-        match system.save_state() {
-            Ok(state) => {
-                let bytes = state.len();
-                let id = self.next_id;
-                self.next_id += 1;
-                self.checkpoints.push(Checkpoint { id, turn, state, units: self.units.clone() });
-                while self.checkpoints.iter().map(|c| c.state.len()).sum::<usize>() > MAX_BYTES && self.checkpoints.len() > 1 {
-                    let gone = self.checkpoints.remove(0).id;
-                    self.actions.retain(|a| a.id != gone);
-                }
-                self.publish();
-                log::info!(
-                    "Recall Fate: checkpoint {id} ({why}, turn {turn}): {:.1} MB in {:.0} ms, {} kept ({:.0} MB)",
-                    bytes as f64 / 1048576.0,
-                    start.elapsed().as_secs_f64() * 1000.0,
-                    self.checkpoints.len(),
-                    self.checkpoints.iter().map(|c| c.state.len()).sum::<usize>() as f64 / 1048576.0
-                );
+        let core = match system.save_core() {
+            Ok(core) => core,
+            Err(error) => {
+                log::warn!("Recall Fate: turn {turn} {why} not saved: {error}");
+                return;
             }
-            Err(error) => log::warn!("Recall Fate: turn {turn} {why} not saved: {error}"),
+        };
+        let phys = &system.memory.phys;
+        let memories: [&[u8]; pages::MEMORIES] = [&phys.fcram, &phys.vram, &phys.dsp_ram, &phys.axi_wram];
+        let same_turn = self.checkpoints.last().is_some_and(|c| c.turn == turn);
+        let pages = match (&mut self.hashes, same_turn) {
+            (Some(hashes), true) => pages::delta(memories, hashes),
+            _ => {
+                let (key, hashes) = pages::key(memories);
+                self.hashes = Some(hashes);
+                key
+            }
+        };
+        let id = self.next_id;
+        self.next_id += 1;
+        let (kind, changed) = (if pages.is_key() { "key" } else { "delta" }, pages.changed());
+        let state = lz4_flex::compress_prepend_size(&core);
+        let bytes = state.len() + pages.bytes();
+        self.checkpoints.push(Checkpoint { id, turn, state, pages, units: self.units.clone() });
+        self.trim();
+        self.publish();
+        log::info!(
+            "Recall Fate: checkpoint {id} ({why}, turn {turn}): {kind} {:.2} MB (pages changed in FCRAM/VRAM/DSP/AXI {changed:?}) in {:.0} ms, {} kept over {} turns ({:.1} MB)",
+            bytes as f64 / 1048576.0,
+            start.elapsed().as_secs_f64() * 1000.0,
+            self.checkpoints.len(),
+            self.turns_kept(),
+            self.kept_bytes() as f64 / 1048576.0
+        );
+    }
+
+    fn kept_bytes(&self) -> usize {
+        self.checkpoints.iter().map(|c| c.state.len() + c.pages.bytes()).sum()
+    }
+
+    fn turns_kept(&self) -> usize {
+        let mut turns: Vec<u16> = self.checkpoints.iter().map(|c| c.turn).collect();
+        turns.dedup();
+        turns.len()
+    }
+
+    /// keeps the newest MAX_TURNS turns (and under MAX_BYTES), dropping the oldest turn whole, so
+    /// every turn kept starts with its key and lists all its actions
+    fn trim(&mut self) {
+        while self.turns_kept() > self.max_turns || (self.kept_bytes() > MAX_BYTES && self.turns_kept() > 1) {
+            let oldest = self.checkpoints[0].turn;
+            let gone: Vec<u32> = self.checkpoints.iter().take_while(|c| c.turn == oldest).map(|c| c.id).collect();
+            self.checkpoints.drain(..gone.len());
+            self.actions.retain(|a| !gone.contains(&a.id));
         }
     }
 
     fn clear(&mut self) {
         self.saved = None;
+        self.hashes = None;
         self.looked = false;
         self.checkpoints.clear();
         self.actions.clear();
@@ -387,7 +443,13 @@ impl Recall {
     fn restore(&mut self, system: &mut System, id: u32) -> Result<(), String> {
         let at = self.checkpoints.iter().position(|c| c.id == id).ok_or("That moment cannot be recalled")?;
         let start = std::time::Instant::now();
-        system.load_state(&self.checkpoints[at].state)?;
+        let key = (0..=at).rev().find(|&i| self.checkpoints[i].pages.is_key()).ok_or("That moment's turn cannot be recalled")?;
+        let chain: Vec<&pages::Pages> = self.checkpoints[key..=at].iter().map(|c| &c.pages).collect();
+        let memories = pages::rebuild(&chain)?;
+        let core = lz4_flex::decompress_size_prepended(&self.checkpoints[at].state).map_err(|e| format!("A checkpoint is damaged, {e}"))?;
+        system.load_core(&core, [&memories[0], &memories[1], &memories[2], &memories[3]])?;
+        // the next delta is taken against this moment
+        self.hashes = Some([0, 1, 2, 3].map(|m| pages::hashes(&memories[m])));
         let turn = self.checkpoints[at].turn;
         self.checkpoints.truncate(at + 1);
         // the actions from this checkpoint on are undone

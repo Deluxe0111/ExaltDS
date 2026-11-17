@@ -11,6 +11,8 @@ crate-type = ["cdylib"]
 [dependencies]
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
+# Recall Fate's checkpoints (the same LZ4 as zakuro-core's save states)
+lz4_flex = "0.14.0"
 
 [dev-dependencies]
 zakuro-gpu = { path = "../zakuro-gpu", default-features = false }
