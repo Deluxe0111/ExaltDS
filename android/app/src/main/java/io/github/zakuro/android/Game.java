@@ -51,6 +51,13 @@ public final class Game extends NativeActivity {
         try { GameSettings.load(this,id).apply(next,GameImport.active(this,id)); pendingRestart=next; finish(); }
         catch(Exception e) { showNativeMessage(e.getMessage()); nativeCommand(RESUME); }
     }
+    /** ExaltDS: leaves the game for the start screen (Set up the game again…, saves), which otherwise only shows after a failed start. */
+    private boolean pendingHome;
+    void confirmHome() {
+        confirm(new AlertDialog.Builder(this,palette.dialogTheme()).setTitle("Set up the game again?").setMessage("The game closes and the setup screen opens. Unsaved progress is lost; in-game saves, save states, mods and textures are kept.")
+                .setPositiveButton("Continue",(d,w) -> { pendingHome=true; finish(); }).setNegativeButton("Cancel",null)
+                .setOnDismissListener(d -> { if (!pendingHome) nativeCommand(RESUME); }));
+    }
     void confirmQuit() {
         confirm(new AlertDialog.Builder(this,palette.dialogTheme()).setTitle("Quit ExaltDS?").setMessage("Unsaved progress is lost. In-game saves and save states are kept.")
                 .setPositiveButton("Quit",(d,w) -> { nativeCommand(EXIT); finishAndRemoveTask(); }).setNegativeButton("Cancel",null)
@@ -558,6 +565,13 @@ public final class Game extends NativeActivity {
         if (saveGuard != null) {
             try { saveGuard.close(); } catch (java.io.IOException e) { android.util.Log.w("Zakuro", "Closing save lock", e); }
             saveGuard = null;
+        }
+        if (pendingHome) {
+            pendingHome = false;
+            android.content.Intent home = new android.content.Intent(getApplicationContext(), ExaltHome.class)
+                    .putExtra("home", true).addFlags(android.content.Intent.FLAG_ACTIVITY_NEW_TASK);
+            android.content.Context application = getApplicationContext();
+            new android.os.Handler(android.os.Looper.getMainLooper()).post(() -> application.startActivity(home));
         }
         if (pendingRestart != null) {
             android.content.Intent next = pendingRestart;

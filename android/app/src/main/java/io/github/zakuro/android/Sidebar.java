@@ -329,6 +329,7 @@ final class Sidebar {
         if (ExaltUpdater.available(game)) main.addView(row("Check for updates", v -> checkUpdate()));
         main.addView(divider());
         main.addView(row("Restart game", v -> { close(true); game.confirmRestart(); }));
+        main.addView(row("Set up the game again…", v -> { close(true); game.confirmHome(); }));
         Button quit = row("Quit ExaltDS", v -> { close(true); game.confirmQuit(); });
         quit.setTextColor(Exalt.DANGER);
         main.addView(quit);
