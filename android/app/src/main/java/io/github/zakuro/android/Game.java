@@ -27,6 +27,19 @@ public final class Game extends NativeActivity {
     private Sidebar sidebar;
     private PerfOverlay perf;
     void setPerfLevel(int level) { if (perf != null) perf.setLevel(level); }
+    /** ExaltDS's sidebar switch for the clock: shown or hidden from the next tick. */
+    void setShowClock(boolean on) { if (settings != null) settings.values.put("show_clock", on); }
+    private ExaltTelemetry telemetry;
+    /** ExaltDS's opt-in diagnostics, started or stopped when the player changes the switch. */
+    void telemetry(boolean on) {
+        if (!exalt) return;
+        if (on) { if (telemetry == null) telemetry = new ExaltTelemetry(this, this::nativeFrameTimes); telemetry.start(); }
+        else if (telemetry != null) telemetry.stop();
+    }
+    @Override protected void onPause() {
+        super.onPause();
+        if (telemetry != null) telemetry.pause();
+    }
     @Override protected void onActivityResult(int request, int result, android.content.Intent data) {
         super.onActivityResult(request, result, data);
         if (sidebar != null) sidebar.result(request, result, data);
@@ -234,6 +247,7 @@ public final class Game extends NativeActivity {
             perf = new PerfOverlay(this, this::nativeFrameTimes);
             perf.setLevel(Exalt.perfLevel(this));
             panel(perf, android.view.Gravity.TOP | android.view.Gravity.START, false, -2, -2, dp(6), dp(6));
+            telemetry(ExaltTelemetry.enabled(this));
         }
         if (settings.flag("touch_controls")) {
             android.widget.LinearLayout controls = new android.widget.LinearLayout(this);
@@ -522,6 +536,7 @@ public final class Game extends NativeActivity {
         panels.clear();
         if (pauseDialog != null) pauseDialog.dismiss();
         if (sidebar != null) sidebar.dismissNow();
+        if (telemetry != null) telemetry.stop();
         if (errorDialog != null) { errorDialog.dismiss(); errorDialog = null; }
         // NativeActivity unload joins android_main; only then may a new native session start.
         super.onDestroy();

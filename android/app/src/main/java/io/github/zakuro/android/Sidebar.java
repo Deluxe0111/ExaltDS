@@ -52,7 +52,65 @@ final class Sidebar {
         started = snapshot(s);
     }
 
-    private static String snapshot(GameSettings s) { return s.json() + "|" + s.resolution + "|" + s.textures + "|" + s.driver; }
+    /** The settings that need a restart; the clock is live, so it is left out. */
+    private static String snapshot(GameSettings s) {
+        Object clock = s.values.get("show_clock");
+        s.values.put("show_clock", true);
+        String out = s.json() + "|" + s.resolution + "|" + s.textures + "|" + s.driver;
+        if (clock == null) s.values.remove("show_clock"); else s.values.put("show_clock", clock);
+        return out;
+    }
+
+    static final String NAGA_NOTICE = "You'll receive Naga's Tear the next time you enter the world map: Robin and Chrom "
+            + "find it, and Recall Fate appears in the map menu during battles.\n\n"
+            + "Naga's Tear is experimental. It needs a restart: choose Apply and restart.";
+
+    private void notice(String title, String message) {
+        AlertDialog d = new AlertDialog.Builder(game, game.palette().dialogTheme()).setTitle(title).setMessage(message)
+                .setPositiveButton("OK", null).create();
+        d.show(); game.palette().dialog(d, false);
+    }
+
+    // ---- updates (ExaltUpdater) ----
+
+    private void checkUpdate() {
+        toast("Checking for updates…");
+        new Thread(() -> {
+            String error = null;
+            ExaltUpdater.Release r = null;
+            try { r = ExaltUpdater.latest(game); } catch (Exception e) { error = e.getMessage(); }
+            ExaltUpdater.Release release = r;
+            String failed = error;
+            game.runOnUiThread(() -> {
+                if (failed != null) { toast("Could not check: " + failed); return; }
+                String current = ExaltUpdater.currentVersion(game);
+                if (!ExaltUpdater.newer(release.tag, current)) { toast("ExaltDS " + current + " is the latest version."); return; }
+                String notes = release.notes == null ? "" : release.notes.trim();
+                if (notes.length() > 600) notes = notes.substring(0, 600) + "…";
+                AlertDialog d = new AlertDialog.Builder(game, game.palette().dialogTheme()).setTitle("ExaltDS " + release.tag + " is available")
+                        .setMessage((notes.isEmpty() ? "" : notes + "\n\n") + String.format(Locale.ROOT, "Download %.0f MB and install it? Your game, saves and settings stay.", release.size / 1048576.0))
+                        .setPositiveButton("Update", (x, w) -> update(release)).setNegativeButton("Not now", null).create();
+                d.show(); game.palette().dialog(d, false);
+            });
+        }, "exalt-update-check").start();
+    }
+
+    private void update(ExaltUpdater.Release release) {
+        if (!ExaltUpdater.canInstall(game)) {
+            toast("Allow ExaltDS to install apps, then choose Check for updates again.");
+            ExaltUpdater.openInstallSettings(game);
+            return;
+        }
+        new Thread(() -> {
+            try {
+                java.io.File apk = ExaltUpdater.download(game, release, m -> game.runOnUiThread(() -> toast(m)));
+                game.runOnUiThread(() -> toast("Installing " + release.tag + "… ExaltDS closes when it is done."));
+                ExaltUpdater.install(game, apk, error -> game.runOnUiThread(() -> { if (error != null) toast("The update was not installed: " + error); }));
+            } catch (Exception e) {
+                game.runOnUiThread(() -> toast("The update failed: " + e.getMessage()));
+            }
+        }, "exalt-update").start();
+    }
     private int px(float v) { return Math.round(v * dp); }
     boolean isOpen() { return open; }
 
@@ -208,6 +266,13 @@ final class Sidebar {
             @Override public void onStopTrackingTouch(SeekBar b) { }
         });
         main.addView(perf, new LinearLayout.LayoutParams(-1, px(40)));
+        // the clock in the top-right corner: live
+        main.addView(check("Clock", s.flag("show_clock"), on -> {
+            s.values.put("show_clock", on);
+            try { s.save(game); } catch (Exception e) { toast("Could not save: " + e.getMessage()); }
+            game.setShowClock(on);
+            refreshApply();
+        }));
         main.addView(divider());
 
         main.addView(label("Takes effect after Apply and restart"));
@@ -235,11 +300,12 @@ final class Sidebar {
         // Naga's Tear: offers the relic to campaigns that don't have it yet (Robin and Chrom's scene on the world map).
         // A campaign that has it keeps it in its save; turning this off only stops offering it.
         Exalt.Layer naga = Exalt.naga(game, id);
-        CheckBox nagaBox = check("Naga's Tear (offer on the world map)", naga != null && naga.on, on -> {
+        CheckBox nagaBox = check("Naga's Tear (experimental)", naga != null && naga.on, on -> {
             Exalt.Layer n = Exalt.naga(game, id);
             if (n != null) { Exalt.setOn(game, id, n.name, on); modsChanged = true; refreshApply(); }
+            if (on) notice("Naga's Tear", NAGA_NOTICE);
         });
-        if (naga == null) { nagaBox.setEnabled(false); nagaBox.setAlpha(0.45f); nagaBox.setText("Naga's Tear: import its layer in Mods / textures"); }
+        if (naga == null) { nagaBox.setEnabled(false); nagaBox.setAlpha(0.45f); nagaBox.setText("Naga's Tear: set it up from the start page"); }
         main.addView(nagaBox);
         boolean pack = hasPack();
         CheckBox hd = check("HD textures", pack && s.textures, on -> { s.textures = on; save(); });
@@ -247,14 +313,18 @@ final class Sidebar {
         main.addView(hd);
         main.addView(divider());
 
-        // Recall Fate, turn-level proof of concept (NAGA_TEAR_PLAN.md NT-04): back to the start of an
-        // earlier player phase of this battle. The battle menu command comes later (NT-06).
-        if (naga != null && naga.on) main.addView(row("Recall Fate (test)…", v -> recallFate()));
+        // (Recall Fate is chosen from the game's own map menu; "Replace native game code" is left out for now: setup
+        // builds the game code on the device)
         main.addView(row("Mods / textures…", v -> show(mods)));
         main.addView(row("GPU driver…", v -> show(drivers)));
-        // a rebuilt title.so in place: keeps the ROM, textures, mods, saves and save states (Replace game files drops the states)
-        main.addView(row("Replace native game code…", v -> pick(PICK_CODE)));
         main.addView(row("All settings…", v -> { close(true); game.openSettings(); }));
+        main.addView(divider());
+        if (ExaltTelemetry.available(game))
+            main.addView(check("Share anonymous diagnostics", ExaltTelemetry.enabled(game), on -> {
+                ExaltTelemetry.setConsent(game, on);
+                game.telemetry(on);
+            }));
+        if (ExaltUpdater.available(game)) main.addView(row("Check for updates", v -> checkUpdate()));
         main.addView(divider());
         main.addView(row("Restart game", v -> { close(true); game.confirmRestart(); }));
         Button quit = row("Quit ExaltDS", v -> { close(true); game.confirmQuit(); });

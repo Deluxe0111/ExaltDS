@@ -27,8 +27,24 @@ public final class ExaltHome extends Activity {
         super.onCreate(state);
         String id = Exalt.gameId(this);
         boolean failed = Exalt.prefs(this).getBoolean("launch_failed", false);
-        if (state == null && id != null && !failed && !getIntent().getBooleanExtra("home", false)) { play(); return; }
+        if (state == null && id != null && !failed && !getIntent().getBooleanExtra("home", false) && !askDiagnostics()) { play(); return; }
         build();
+        if (id != null) askDiagnostics();
+    }
+
+    /** Asks once (in a build with a diagnostics server) whether to share anonymous diagnostics; true while it asks. */
+    private boolean asking;
+    private boolean askDiagnostics() {
+        if (asking || !ExaltTelemetry.available(this) || ExaltTelemetry.consent(this) != null) return asking;
+        asking = true;
+        if (actions == null) build();
+        AlertDialog d = new AlertDialog.Builder(this, android.R.style.Theme_DeviceDefault_Dialog_Alert).setTitle("Share anonymous diagnostics?")
+                .setMessage(ExaltTelemetry.QUESTION).setCancelable(false)
+                .setPositiveButton("Share", (x, w) -> { ExaltTelemetry.setConsent(this, true); asking = false; })
+                .setNegativeButton("No thanks", (x, w) -> { ExaltTelemetry.setConsent(this, false); asking = false; })
+                .create();
+        d.show();
+        return true;
     }
 
     private int dp(int v) { return Math.round(v * getResources().getDisplayMetrics().density); }

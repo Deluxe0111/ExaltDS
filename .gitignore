@@ -8,3 +8,6 @@ Lossless.dll
 /dump
 /user/
 /sysdata/
+
+# ExaltDS: the telemetry address and key, kept out of the repository
+/android/exalt/local-res/
