@@ -28,9 +28,9 @@ ExaltDS contains **no game files**. You need your own legally obtained, decrypte
   true 16:9. No letterboxing, no stretching a single window across both.
 - **Native, not emulated.** The game's code is recompiled once, on your device, from your own copy. After that it just
   runs.
-- **Sharper than the original ever was.** Up to 4× resolution, optional HD texture packs, and a no-glow option so bright
+- **Sharper than the original.** Up to 4× resolution, optional HD texture packs, and a no-glow option so bright
   scenes stay clean instead of washing out.
-- **Smooth where it counts.** Cutscenes and in-game attack animations run at 60 fps, at the original speed or faster.
+- **Smooth.** Cutscenes and in-game attack animations run at 60 fps, at the original speed or faster.
 - **Recall Fate.** Take back any move, not just the last one. More below.
 - **One app, one setup.** Pick your game file, press **Set up**, press **Play**. No PC step, no extra tools.
 
