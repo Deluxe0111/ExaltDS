@@ -1315,6 +1315,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "exalt-mods"
+version = "0.2.32"
+dependencies = [
+ "cityhasher",
+ "png",
+ "zakuro-fs",
+]
+
+[[package]]
 name = "fax"
 version = "0.2.7"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -4679,6 +4688,7 @@ version = "0.2.30"
 dependencies = [
  "android-activity",
  "ash",
+ "exalt-mods",
  "jni 0.21.1",
  "libloading",
  "log",
@@ -4686,10 +4696,12 @@ dependencies = [
  "ndk",
  "ndk-sys",
  "raw-window-handle",
+ "recomp3ds",
  "serde",
  "serde_json",
  "zakuro-common",
  "zakuro-core",
+ "zakuro-fs",
  "zakuro-gpu",
 ]
 

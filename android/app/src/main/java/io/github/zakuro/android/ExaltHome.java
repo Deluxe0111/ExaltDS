@@ -12,16 +12,18 @@ import android.widget.*;
 import java.util.Locale;
 
 /**
- * ExaltDS's launcher activity. Once the game files are set up it starts the game straight away (the sidebar holds
- * everything else); before that, or after a failed start, it shows this page: set up or replace the game files, and
- * move in-game saves in and out as Zakuroishi save ZIPs.
+ * ExaltDS's launcher activity. Once the game is set up it starts the game straight away (the sidebar holds everything
+ * else); before that, or after a failed start, it shows this page: set the game up from the player's own files
+ * (ExaltSetup: the game, optional DLC, Naga's Tear), and move in-game saves in and out as Zakuroishi save ZIPs.
  */
 public final class ExaltHome extends Activity {
-    private static final int IMPORT = 1, EXPORT_SAVES = 2, RESTORE_SAVES = 3;
+    private static final int PICK_GAME = 1, EXPORT_SAVES = 2, RESTORE_SAVES = 3, PICK_DLC = 4;
     private TextView status;
     private ProgressBar progress;
     private LinearLayout actions;
-    private boolean busy;
+    private boolean busy, setupOpen;
+    private Uri game, dlc;
+    private boolean naga;
 
     @Override protected void onCreate(Bundle state) {
         super.onCreate(state);
@@ -87,7 +89,7 @@ public final class ExaltHome extends Activity {
 
         actions = new LinearLayout(this);
         actions.setOrientation(LinearLayout.VERTICAL);
-        page.addView(actions, new LinearLayout.LayoutParams(dp(380), -2));
+        page.addView(actions, new LinearLayout.LayoutParams(dp(420), -2));
         refresh();
 
         ScrollView scroll = new ScrollView(this);
@@ -102,15 +104,31 @@ public final class ExaltHome extends Activity {
     private void refresh() {
         actions.removeAllViews();
         String id = Exalt.gameId(this);
-        if (id == null) {
-            status.setText("Choose the folder that holds your decrypted Fire Emblem Awakening ROM (.3ds, .cci or .cxi) and its Android title.so. "
-                    + "Only use a title.so you trust: it runs inside this app.");
-            actions.addView(button("Set up game files…", true, v -> pickGame()));
+        if (busy) {
+            actions.addView(button("Stop", false, v -> { ExaltSetup.nativeCancel(); status.setText("Stopping…"); }));
+        } else if (id == null || setupOpen) {
+            if (status.getText().length() == 0 || !setupOpen) status.setText(SETUP_TEXT);
+            setupOpen = true;
+            actions.addView(button(game == null ? "Choose your game file…" : "Game: " + ExaltSetup.displayName(this, game), game == null, v -> pick(PICK_GAME)));
+            actions.addView(button(dlc == null ? "Add the DLC (optional)…" : "DLC: " + ExaltSetup.displayName(this, dlc), false, v -> pick(PICK_DLC)));
+            actions.addView(check("Naga's Tear (experimental)", naga, on -> {
+                naga = on;
+                if (on) new AlertDialog.Builder(this, android.R.style.Theme_DeviceDefault_Dialog_Alert).setTitle("Naga's Tear")
+                        .setMessage("You'll receive Naga's Tear the next time you enter the world map: Robin and Chrom find it, and "
+                                + "Recall Fate appears in the map menu during battles.\n\nNaga's Tear is experimental. You can turn it "
+                                + "off or on later in the sidebar (it then needs Apply and restart).")
+                        .setPositiveButton("OK", null).show();
+            }));
+            Button go = button("Set up", game != null, v -> setup());
+            go.setEnabled(game != null);
+            go.setAlpha(game != null ? 1f : 0.5f);
+            actions.addView(go);
+            if (id != null) actions.addView(button("Cancel", false, v -> { setupOpen = false; status.setText(""); refresh(); }));
         } else {
             if (status.getText().length() == 0) status.setText(Exalt.prefs(this).getBoolean("launch_failed", false)
-                    ? "The game stopped last time. Replace the game files if they are damaged or out of date, or try again." : "Ready.");
+                    ? "The game stopped last time. Set it up again if its files are damaged, or try again." : "Ready.");
             actions.addView(button("Play", true, v -> { Exalt.prefs(this).edit().putBoolean("launch_failed", false).commit(); play(); }));
-            actions.addView(button("Replace game files…", false, v -> pickGame()));
+            actions.addView(button("Set up the game again…", false, v -> { setupOpen = true; status.setText(SETUP_TEXT); refresh(); }));
             actions.addView(button("Export in-game saves…", false, v -> pickSaves(true)));
             actions.addView(button("Restore in-game saves…", false, v -> pickSaves(false)));
         }
@@ -118,22 +136,44 @@ public final class ExaltHome extends Activity {
         if (first != null) first.post(first::requestFocusFromTouch);
     }
 
+    private static final String SETUP_TEXT = "Choose your own decrypted Fire Emblem Awakening (US) as a .3ds, .cci or .cia file, and its DLC "
+            + ".cia if you have it. ExaltDS builds the game's code for this device from it: this takes about 5 to 10 minutes. "
+            + "Keep ExaltDS open and the device charging. Your saves stay as they are.";
+
     private Button button(String label, boolean primary, View.OnClickListener l) {
         Button b = new Button(this);
         b.setText(label); b.setAllCaps(false); b.setTextSize(16);
         b.setTextColor(primary ? 0xFF1A1405 : Exalt.INK);
         b.setTypeface(Typeface.create("sans-serif-medium", Typeface.NORMAL));
         b.setStateListAnimator(null);
+        b.setSingleLine(true); b.setEllipsize(android.text.TextUtils.TruncateAt.MIDDLE);
         android.graphics.drawable.StateListDrawable s = new android.graphics.drawable.StateListDrawable();
         s.addState(new int[]{android.R.attr.state_focused}, shape(primary ? 0xFFF0C766 : Exalt.PRESS, 0xFFFFFFFF));
         s.addState(new int[]{android.R.attr.state_pressed}, shape(primary ? 0xFFF0C766 : Exalt.PRESS, 0));
         s.addState(new int[]{}, shape(primary ? Exalt.GOLD : Exalt.FOCUS, 0));
         b.setBackground(s);
         b.setOnClickListener(l);
-        b.setEnabled(!busy);
         LinearLayout.LayoutParams lp = new LinearLayout.LayoutParams(-1, dp(52)); lp.setMargins(0, dp(6), 0, dp(6));
         b.setLayoutParams(lp);
         return b;
+    }
+
+    private interface Toggle { void on(boolean v); }
+
+    private CheckBox check(String label, boolean on, Toggle t) {
+        CheckBox c = new CheckBox(this);
+        c.setText(label); c.setTextSize(16); c.setTextColor(Exalt.INK);
+        c.setButtonTintList(android.content.res.ColorStateList.valueOf(Exalt.GOLD));
+        c.setChecked(on);
+        c.setPadding(dp(8), 0, dp(14), 0);
+        android.graphics.drawable.StateListDrawable s = new android.graphics.drawable.StateListDrawable();
+        s.addState(new int[]{android.R.attr.state_focused}, shape(Exalt.FOCUS, 0xFFFFFFFF));
+        s.addState(new int[]{}, new android.graphics.drawable.ColorDrawable(0));
+        c.setBackground(s);
+        c.setOnCheckedChangeListener((b, v) -> t.on(v));
+        LinearLayout.LayoutParams lp = new LinearLayout.LayoutParams(-1, dp(52)); lp.setMargins(0, dp(6), 0, dp(6));
+        c.setLayoutParams(lp);
+        return c;
     }
 
     private GradientDrawable shape(int fill, int stroke) {
@@ -147,9 +187,11 @@ public final class ExaltHome extends Activity {
             if (e.getAction() == KeyEvent.ACTION_UP && getCurrentFocus() != null) getCurrentFocus().performClick();
             return true;
         }
-        if (e.getKeyCode() == KeyEvent.KEYCODE_BUTTON_B) { if (e.getAction() == KeyEvent.ACTION_UP) finish(); return true; }
+        if (e.getKeyCode() == KeyEvent.KEYCODE_BUTTON_B) { if (e.getAction() == KeyEvent.ACTION_UP && !busy) finish(); return true; }
         return super.dispatchKeyEvent(e);
     }
+
+    @Override public void onBackPressed() { if (!busy) super.onBackPressed(); }
 
     private void play() {
         String id = Exalt.gameId(this);
@@ -163,9 +205,10 @@ public final class ExaltHome extends Activity {
         }
     }
 
-    private void pickGame() {
+    private void pick(int request) {
         if (busy) return;
-        startActivityForResult(new Intent(Intent.ACTION_OPEN_DOCUMENT_TREE).addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION | Intent.FLAG_GRANT_PREFIX_URI_PERMISSION), IMPORT);
+        startActivityForResult(new Intent(Intent.ACTION_OPEN_DOCUMENT).addCategory(Intent.CATEGORY_OPENABLE).setType("*/*")
+                .addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION), request);
     }
 
     private void pickSaves(boolean export) {
@@ -179,26 +222,39 @@ public final class ExaltHome extends Activity {
 
     private void run(String working, Job job) {
         busy = true; progress.setVisibility(View.VISIBLE); status.setText(working); refresh();
+        getWindow().addFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON);
         new Thread(() -> {
             String done;
-            try { done = job.run(); } catch (Exception e) { done = "Failed: " + (e.getMessage() == null ? e.getClass().getSimpleName() : e.getMessage()); }
+            boolean ok = false;
+            try { done = job.run(); ok = true; } catch (Exception e) { done = "Failed: " + (e.getMessage() == null ? e.getClass().getSimpleName() : e.getMessage()); }
             String text = done;
-            runOnUiThread(() -> { busy = false; progress.setVisibility(View.GONE); status.setText(text); refresh(); });
+            boolean succeeded = ok;
+            runOnUiThread(() -> {
+                busy = false; progress.setVisibility(View.GONE);
+                getWindow().clearFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON);
+                if (succeeded && setupOpen) { setupOpen = false; game = null; dlc = null; }
+                status.setText(text); refresh();
+            });
         }, "exalt-home").start();
+    }
+
+    private void setup() {
+        if (busy || game == null) return;
+        Uri g = game, d = dlc;
+        boolean n = naga;
+        run("Starting setup…", () -> {
+            ExaltSetup.run(getApplicationContext(), g, d, n, text -> runOnUiThread(() -> status.setText(text)));
+            return "The game is set up. Press Play; the sidebar (Back in game) has the settings, mods and textures.";
+        });
     }
 
     @Override protected void onActivityResult(int request, int result, Intent data) {
         super.onActivityResult(request, result, data);
         if (result != RESULT_OK || data == null || data.getData() == null || status == null) return;
         Uri uri = data.getData();
+        if (request == PICK_GAME) { game = uri; refresh(); return; }
+        if (request == PICK_DLC) { dlc = uri; refresh(); return; }
         String id = Exalt.gameId(this);
-        if (request == IMPORT) run("Checking the folder… No files copied yet.", () -> {
-            String added = GameImport.install(getApplicationContext(), uri, false, (bytes, files, name) ->
-                    runOnUiThread(() -> status.setText(String.format(Locale.ROOT, "Copying game files… %.0f MB", bytes / 1048576.0))));
-            Exalt.prefs(this).edit().putBoolean("launch_failed", false).commit();
-            Exalt.firstSetup(this, added);
-            return "Game files ready (" + added + "). Mods, textures and drivers are in the sidebar: press Back in game.";
-        });
         if (id == null) return;
         if (request == EXPORT_SAVES || request == RESTORE_SAVES) run(request == EXPORT_SAVES ? "Exporting saves…" : "Restoring saves…", () -> {
             try (SaveArchive.Guard ignored = SaveArchive.lock(getFilesDir(), id)) {

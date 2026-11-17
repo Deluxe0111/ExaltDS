@@ -28,7 +28,7 @@
 //! when the structure moves (another map) or is gone, or when a save state is loaded.
 //!
 //! The game asks for a restore from its own map menu: title.so's override
-//! `overrides/awakening-usa/recall_fate.c` (Awakening-Port) reads the entries with
+//! `crates/exalt-mods/overrides/recall_fate.c` reads the entries with
 //! `zakuro_recall_entries` and asks with `zakuro_recall_go` (the older `zakuro_recall_turns` and
 //! `zakuro_recall_request` still work); the restore happens after the frame in which it was asked.
 //!

@@ -170,29 +170,79 @@ final class GameImport {
             String name = GameMetadata.romTitle(rom);
             if (name.isEmpty()) name = GameMetadata.choose(plan.rom.name, folderName(context.getContentResolver(), tree), plan.titleId);
             GameMetadata.store(stage, name);
-            File data = new File(stage, "data"); mkdir(data);
-            File user = new File(context.getFilesDir(), "savedata/" + plan.titleId + "/user"); mkdir(user);
-            Os.symlink(user.getAbsolutePath(), new File(data, "user").getAbsolutePath());
-            android.util.AtomicFile pointer = new android.util.AtomicFile(new File(imports, plan.titleId + ".active"));
-            synchronized (POINTER_LOCK) {
-                FileOutputStream stream = null;
-                try {
-                    stream = pointer.startWrite();
-                    byte[] expected = stage.getName().getBytes(java.nio.charset.StandardCharsets.UTF_8);
-                    stream.write(expected);
-                    stream.getFD().sync();
-                    // Once activation is attempted, retain its target if the outcome is uncertain.
-                    keepStage = true;
-                    pointer.finishWrite(stream);
-                    stream = null;
-                    try (InputStream saved = pointer.openRead()) {
-                        for (byte value : expected) if (saved.read() != (value & 255)) throw new IOException("Could not confirm game activation");
-                        if (saved.read() != -1) throw new IOException("Could not confirm game activation");
-                    }
-                } catch (Exception e) { if (stream != null) pointer.failWrite(stream); throw e; }
-            }
+            boolean[] kept = {false};
+            try { activate(context, imports, stage, plan.titleId, kept); } finally { keepStage = kept[0]; }
             return plan.titleId;
         } finally { if (!keepStage) remove(stage); }
+    }
+
+    /** Links the version's saves and makes it the title's active version; kept[0] is set once the stage must stay. */
+    private static void activate(android.content.Context context, File imports, File stage, String titleId, boolean[] kept) throws Exception {
+        File data = new File(stage, "data"); mkdir(data);
+        File user = new File(context.getFilesDir(), "savedata/" + titleId + "/user"); mkdir(user);
+        Os.symlink(user.getAbsolutePath(), new File(data, "user").getAbsolutePath());
+        android.util.AtomicFile pointer = new android.util.AtomicFile(new File(imports, titleId + ".active"));
+        synchronized (POINTER_LOCK) {
+            FileOutputStream stream = null;
+            try {
+                stream = pointer.startWrite();
+                byte[] expected = stage.getName().getBytes(java.nio.charset.StandardCharsets.UTF_8);
+                stream.write(expected);
+                stream.getFD().sync();
+                // Once activation is attempted, retain its target if the outcome is uncertain.
+                kept[0] = true;
+                pointer.finishWrite(stream);
+                stream = null;
+                try (InputStream saved = pointer.openRead()) {
+                    for (byte value : expected) if (saved.read() != (value & 255)) throw new IOException("Could not confirm game activation");
+                    if (saved.read() != -1) throw new IOException("Could not confirm game activation");
+                }
+            } catch (Exception e) { if (stream != null) pointer.failWrite(stream); throw e; }
+        }
+    }
+
+    /**
+     * ExaltDS's setup: installs a game whose native code was built on the device. The ROM, title.so and DLC (or null) are
+     * moved in (they must be on the app's own storage); saves stay where they are, per title.
+     */
+    static void installBuilt(android.content.Context context, String titleId, String name, File rom, File code, File dlc) throws Exception {
+        validId(titleId);
+        try (SeekableByteChannel channel = Files.newByteChannel(code.toPath())) { NativeLibrary.inspect(channel).requireCompatible(); }
+        File imports = new File(context.getFilesDir(), "imports");
+        File stage = new File(imports, UUID.randomUUID().toString());
+        mkdir(imports); Files.createDirectory(stage.toPath());
+        boolean[] kept = {false};
+        File previous = null;
+        List<String> moved = new ArrayList<>();
+        try {
+            mkdir(new File(stage, "game")); mkdir(new File(stage, "code"));
+            Files.move(rom.toPath(), new File(stage, "game/game.3ds").toPath());
+            File target = new File(stage, "code/title.so");
+            Files.move(code.toPath(), target.toPath());
+            if (!target.setReadOnly()) throw new IOException("Cannot secure title.so");
+            if (dlc != null) { mkdir(new File(stage, "dlc")); Files.move(dlc.toPath(), new File(stage, "dlc/dlc.cia").toPath()); }
+            GameMetadata.store(stage, name);
+            // a set-up game being set up again: what its data folder holds (save states, texture pack, mods) comes
+            // along, its old copy goes; the saves themselves are elsewhere (data/user links to them)
+            try { previous = active(context, titleId); } catch (IOException none) { }
+            File[] old = previous == null ? null : new File(previous, "data").listFiles();
+            if (old != null) {
+                mkdir(new File(stage, "data"));
+                for (File f : old) {
+                    if (f.getName().equals("user")) continue;
+                    Files.move(f.toPath(), new File(stage, "data/" + f.getName()).toPath());
+                    moved.add(f.getName());
+                }
+            }
+            activate(context, imports, stage, titleId, kept);
+            if (previous != null && !previous.equals(stage)) remove(previous);
+        } finally {
+            if (!kept[0]) {
+                // not activated: the old version keeps what it had
+                for (String entry : moved) try { Files.move(new File(stage, "data/" + entry).toPath(), new File(previous, "data/" + entry).toPath()); } catch (IOException ignored) { }
+                remove(stage);
+            }
+        }
     }
     private static File componentStage(android.content.Context context, ImportPlan plan) throws IOException {
         return componentStage(context, plan, 0);

@@ -122,8 +122,20 @@ try {
     foreach ($license in @('ADRENOTOOLS','LINKERNSBYPASS','LSFG','ZAKURO')) {
         Copy-Item -LiteralPath "$repo/android/app/src/main/assets/licenses/$license.txt" -Destination "$work/assets/licenses/$license.txt"
     }
+    # ExaltDS's on-device compiler (android/exalt/clang-kit.py): programs and libraries for lib/,
+    # headers and runtime in assets/clang-kit.zip, LLVM's license
+    if ($Flavor -eq 'exalt') {
+        Invoke-Tool 'python' @('-I',"$repo/android/exalt/clang-kit.py",$Ndk,"$work/kit","$repo/build/clang-kit-cache")
+        Copy-Item -LiteralPath "$work/kit/assets/clang-kit.zip" -Destination "$work/assets/clang-kit.zip"
+        Copy-Item -LiteralPath "$work/kit/assets/licenses/LLVM.txt" -Destination "$work/assets/licenses/LLVM.txt"
+        Copy-Item -LiteralPath "$repo/crates/exalt-mods/NOTICE.md" -Destination "$work/assets/licenses/EXALT-MODS.txt"
+    }
     Invoke-Tool "$JavaHome/bin/jar.exe" @('--update','--file',"$work/unsigned.apk",'--no-manifest',
         '--no-compress','-C',"$work/dex",'classes.dex','-C',$work,'lib','-C',$work,'assets')
+    # the compiler's ~200 MB compress well; installed with extractNativeLibs, they need not be stored
+    if ($Flavor -eq 'exalt') {
+        Invoke-Tool "$JavaHome/bin/jar.exe" @('--update','--file',"$work/unsigned.apk",'--no-manifest','-C',"$work/kit",'lib')
+    }
     Invoke-Tool "$tools/zipalign.exe" @('-P','16','-f','4',"$work/unsigned.apk","$work/aligned.apk")
     # The Windows fallback has its own local test identity; no Docker key is exported.
     $private = Join-Path $out 'private-signing'
@@ -175,6 +187,8 @@ try {
         $entries = @($archive.Entries | ForEach-Object FullName)
         if ('lib/arm64-v8a/libzakuro_android.so' -notin $entries) { throw 'Native library missing' }
         $allowedAssets = @('assets/licenses/ADRENOTOOLS.txt','assets/licenses/LINKERNSBYPASS.txt','assets/licenses/LSFG.txt','assets/licenses/ZAKURO.txt')
+        # ExaltDS's compiler kit (headers and runtime only: no game data)
+        if ($Flavor -eq 'exalt') { $allowedAssets += @('assets/clang-kit.zip','assets/licenses/LLVM.txt','assets/licenses/EXALT-MODS.txt') }
         if (@($entries | Where-Object { $_ -match '^assets/' -and !$_.EndsWith('/') -and $_ -notin $allowedAssets }).Count) { throw 'Unexpected bundled assets' }
         if (@($entries | Where-Object { $_ -match '\.(dll|spv|dxbc)$' }).Count) { throw 'Shader or DLL files in the APK' }
         if ('lib/arm64-v8a/liblsfg_bridge.so' -notin $entries) { throw 'Frame generation bridge missing' }

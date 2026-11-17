@@ -913,6 +913,8 @@ pub fn run(app: &AndroidApp) -> Result<(), String> {
                 request_wait_idle: settings.request_wait_idle,
                 interpolate: settings.interpolate_on_main(second.is_some()) && s.shared,
                 data_dir: Some(launch.data.clone()),
+                // DLC CIAs ExaltDS's setup put beside the game (<version>/dlc)
+                dlc: launch.game.parent().map(|version| dlc_files(&version.join("dlc"))).unwrap_or_default(),
                 hardware_renderer: settings.hardware_renderer,
                 texture_packs: launch.texture_packs,
                 resolution: launch.resolution,
@@ -1279,4 +1281,13 @@ pub fn run(app: &AndroidApp) -> Result<(), String> {
         next_frame = next_deadline(next_frame, Instant::now(), step);
     }
     Ok(())
+}
+
+/// the .cia files in a folder, sorted (none when there is no such folder)
+fn dlc_files(dir: &std::path::Path) -> Vec<std::path::PathBuf> {
+    let mut files: Vec<std::path::PathBuf> = std::fs::read_dir(dir)
+        .map(|entries| entries.filter_map(Result::ok).map(|e| e.path()).filter(|p| p.extension().is_some_and(|x| x.eq_ignore_ascii_case("cia"))).collect())
+        .unwrap_or_default();
+    files.sort();
+    files
 }

@@ -1,0 +1,11 @@
+[package]
+name = "exalt-mods"
+description = "ExaltDS's mod layers for Fire Emblem Awakening, built from the player's own copy: the feet mod and Naga's Tear"
+version.workspace = true
+edition.workspace = true
+license = "MIT"
+
+[dependencies]
+zakuro-fs = { path = "../zakuro-fs" }
+png = "0.18.1"
+cityhasher = "0.1"

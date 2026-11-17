@@ -25,21 +25,26 @@ ExaltDS contains **no game files**. You need your own legally obtained, decrypte
 | **Device** | 64-bit ARM, Android 11 or newer, Vulkan 1.3. Tested: AYN Thor (Snapdragon 8 Gen 2). |
 | **Game** | Fire Emblem Awakening, US release (`00040000000A0500`), as a decrypted `.3ds`/`.cci` or `.cia`. |
 | **DLC** | Optional: the decrypted DLC `.cia`. |
-| **Storage** | About 2 GB free during setup, 1 GB after. |
+| **Storage** | The game's size (about 2 GB) plus about 1 GB free during setup; the game's size plus about 0.3 GB after. |
+| **Memory** | 8 GB of RAM or more recommended: setup runs a compiler on every core. Tested with 16 GB. |
 
 ## Install
 
 1. Download the latest APK from the [Releases page](../../releases).
 2. Install it. Later versions update from the sidebar (**Check for updates**); install over the app, **don't uninstall
    first** or you lose your saves.
-3. Open ExaltDS and choose your game file (and the DLC, if you have it). Tick **Naga's Tear** if you want it.
-4. Setup builds the game's native code on your device. This takes several minutes; keep the device plugged in.
+3. Open ExaltDS, choose your game file and, if you have it, the DLC file. Tick **Naga's Tear** if you want it, then
+   **Set up**.
+4. Setup copies the game into the app, builds the feet and Naga's Tear from it and recompiles the game's code for your
+   device. On the AYN Thor this takes about 5 minutes; keep ExaltDS open and the device charging. Your saves are kept,
+   and you can delete your own copy of the game file afterwards.
+5. Press **Play**. Settings, mods, texture packs and save states are in the sidebar: press Back in game.
 
 ## Naga's Tear
 
 When you turn it on, Robin and Chrom find Naga's Tear the next time you enter the world map. From then on, **Recall
 Fate** in the battle map menu lists every turn and action of the battle; choose one to return to just before it. It is
-experimental and needs a restart (Apply and restart in the sidebar).
+experimental. It is a box in setup; turning it on or off later, in the sidebar, needs a restart (Apply and restart).
 
 ## Privacy
 
@@ -53,7 +58,8 @@ nothing else.
 ExaltDS is built on [Zakuroishi](https://github.com/Sekyleky/Zakuroishi) and [Zakuro](https://github.com/fearkov/zakuro)
 (MIT), with game code recompiled by [3dsrecomp](https://github.com/fearkov/3dsrecomp) (MIT). The feet mod is from the
 [Fire Emblem: Awakening recompilation project](https://github.com/Zelkin1/fe-awakening-recomp) (MIT). The on-device
-compiler is [LLVM/Clang](https://llvm.org) (Apache-2.0 with LLVM exceptions). Third-party notices are in the app and in
-`THIRD_PARTY_NOTICES.md`.
+compiler is [LLVM/Clang](https://llvm.org) (Apache-2.0 with LLVM exceptions), as built for Android by
+[Termux](https://github.com/termux/termux-packages). All notices, including the libraries the compiler needs, are in
+[`THIRD_PARTY_NOTICES.md`](THIRD_PARTY_NOTICES.md) and in the app.
 
 Not affiliated with Nintendo or Intelligent Systems. Fire Emblem is a trademark of Nintendo.

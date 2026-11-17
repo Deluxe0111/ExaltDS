@@ -25,6 +25,8 @@ mod pages;
 #[cfg(target_os = "android")]
 mod recall;
 #[cfg(target_os = "android")]
+mod setup;
+#[cfg(target_os = "android")]
 mod runtime;
 #[cfg(target_os = "android")]
 mod sensors;
