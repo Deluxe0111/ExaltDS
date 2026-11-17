@@ -13,7 +13,7 @@
 
 ExaltDS takes your own copy of Awakening and turns its code into native ARM64 on your handheld. There is no 3DS
 processor being emulated while you play, so the game has room to run at up to 4× resolution and a steady 60 fps in
-combat, on both screens, the way a handheld with two displays should.
+cutscenes and attack animations, on both screens, the way a handheld with two displays should.
 
 It is built for two devices, and tuned for them: the **AYN Thor** and the **Retroid Pocket Duo**.
 
@@ -30,7 +30,7 @@ ExaltDS contains **no game files**. You need your own legally obtained, decrypte
   runs.
 - **Sharper than the original ever was.** Up to 4× resolution, optional HD texture packs, and a no-glow option so bright
   scenes stay clean instead of washing out.
-- **Smooth combat.** Battles run at 60 fps, at the original speed or faster.
+- **Smooth where it counts.** Cutscenes and in-game attack animations run at 60 fps, at the original speed or faster.
 - **Recall Fate.** Take back any move, not just the last one. More below.
 - **One app, one setup.** Pick your game file, press **Set up**, press **Play**. No PC step, no extra tools.
 
@@ -84,7 +84,7 @@ It isn't supported today, and it's better to do it properly later than to do it 
 | **Game** | Fire Emblem Awakening, US release (`00040000000A0500`), as a decrypted `.3ds`/`.cci` or `.cia`. |
 | **DLC** | Optional: the decrypted DLC `.cia`. |
 | **Storage** | The game's size (about 2 GB) plus about 1 GB free during setup; the game's size plus about 0.3 GB after. |
-| **Memory** | 8 GB of RAM or more recommended: setup runs a compiler on every core. Tested with 16 GB. |
+| **Memory** | 6 GB of RAM minimum; 8 GB or more recommended. Setup runs a compiler on every core. Tested with 16 GB. |
 
 ## Install
 
