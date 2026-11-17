@@ -18,8 +18,10 @@
 //! Checkpoints: the whole console (`System::save_state`, the save states' own format) is saved when
 //! a player phase starts and again whenever a player unit's "has acted" bit goes from 0 to 1, the
 //! end of an action and so the moment before the next one. Each action gets an entry: its turn, its
-//! unit, a rough kind (attack: an enemy lost HP or a unit went; heal: another player unit gained HP;
-//! move: it moved; otherwise wait) and the checkpoint taken before it. Going back to an entry loads
+//! unit, its kind and the checkpoint taken before it. The kind is the unit command last chosen
+//! (title.so reports Attack, Dance, Staff, Items, Pair Up, Separate, Rally, Talk, Visit and Wait
+//! through `zakuro_recall_command`); for Wait or none, what the action changed (attack: an enemy
+//! lost HP or a unit went; heal: another player unit gained HP; move: it moved; otherwise wait). Going back to an entry loads
 //! that checkpoint and drops everything after it. All of it belongs to one battle: it starts over
 //! when the structure moves (another map) or is gone, or when a save state is loaded.
 //!
@@ -33,7 +35,7 @@
 //! units' and the mind's words whenever they change, and each player unit's person once.
 
 use std::collections::{HashMap, HashSet};
-use std::sync::atomic::{AtomicU32, Ordering};
+use std::sync::atomic::{AtomicU32, AtomicU8, Ordering};
 use std::sync::Mutex;
 
 use zakuro_core::System;
@@ -73,6 +75,14 @@ pub const ATTACK: u8 = 1;
 pub const HEAL: u8 = 2;
 pub const MOVE: u8 = 3;
 pub const WAIT: u8 = 4;
+pub const DANCE: u8 = 5;
+pub const STAFF: u8 = 6;
+pub const ITEM: u8 = 7;
+pub const PAIR_UP: u8 = 8;
+pub const SEPARATE: u8 = 9;
+pub const RALLY: u8 = 10;
+pub const TALK: u8 = 11;
+pub const VISIT: u8 = 12;
 
 /// one line of the history, as title.so reads it (newest first)
 #[repr(C)]
@@ -115,6 +125,16 @@ pub unsafe extern "C" fn zakuro_recall_entries(out: *mut Entry, length: usize) -
         }
     }
     entries.len()
+}
+
+/// the unit command last chosen in the game's command menu (an entry kind), 0 for none
+static COMMAND: AtomicU8 = AtomicU8::new(0);
+
+/// For title.so: a unit command was chosen (an entry kind: Attack, Wait, Dance, Staff, Items, Pair
+/// Up, Separate, Rally, Talk, Visit). The last one chosen before the unit has acted names the action.
+#[no_mangle]
+pub extern "C" fn zakuro_recall_command(kind: u8) {
+    COMMAND.store(kind, Ordering::Release);
 }
 
 /// For title.so: go back to that entry (its id) after this frame.
@@ -262,6 +282,7 @@ impl Recall {
         self.looked = true;
         if !playing {
             self.units.clear();
+            COMMAND.store(0, Ordering::Release);
             return;
         }
         let units = read_units(system);
@@ -273,6 +294,7 @@ impl Recall {
             if !first_look {
                 self.checkpoint(system, turn, "turn");
             }
+            COMMAND.store(0, Ordering::Release);
             return;
         }
         // an action has ended: a player unit has acted, or one has gone (fell in its own combat)
@@ -285,13 +307,14 @@ impl Recall {
             });
         let previous = std::mem::replace(&mut self.units, units);
         let Some((address, actor)) = actor else { return };
+        let command = COMMAND.swap(0, Ordering::AcqRel);
         // the newest checkpoint is the moment before this action (a battle seen first mid-phase
         // has none yet)
         let Some(before) = self.checkpoints.last() else { return };
         if before.turn != turn {
             return;
         }
-        let kind = kind_of(address, &before.units, &self.units);
+        let kind = named(command, kind_of(address, &before.units, &self.units));
         let entry = Entry { id: before.id, turn, unit: actor.index, kind, pad: [0; 3], person: actor.person };
         self.actions.push(entry);
         log::info!("Recall Fate: turn {turn}, unit {} {} (from checkpoint {})", actor.index, kind_name(kind), before.id);
@@ -526,12 +549,29 @@ fn kind_of(actor: u32, before: &HashMap<u32, Seen>, after: &HashMap<u32, Seen>) 
     }
 }
 
+/// an action's kind from the command chosen for it (0 for none seen) and what it changed: Wait
+/// (or no command) leaves it to the change, so a unit that moved first reads as a move
+fn named(command: u8, changed: u8) -> u8 {
+    match command {
+        ATTACK | DANCE..=VISIT => command,
+        _ => changed,
+    }
+}
+
 pub fn kind_name(kind: u8) -> &'static str {
     match kind {
         TURN_START => "turn",
         ATTACK => "attack",
         HEAL => "heal",
         MOVE => "move",
+        DANCE => "dance",
+        STAFF => "staff",
+        ITEM => "item",
+        PAIR_UP => "pair up",
+        SEPARATE => "separate",
+        RALLY => "rally",
+        TALK => "talk",
+        VISIT => "visit",
         _ => "wait",
     }
 }
@@ -557,6 +597,17 @@ mod tests {
         assert_eq!(kind_of(1, &before, &after), ATTACK);
         after.remove(&2);
         assert_eq!(kind_of(1, &before, &after), ATTACK);
+    }
+
+    #[test]
+    fn a_chosen_command_names_the_action_unless_it_is_wait() {
+        assert_eq!(named(0, MOVE), MOVE);
+        assert_eq!(named(WAIT, MOVE), MOVE);
+        assert_eq!(named(WAIT, WAIT), WAIT);
+        assert_eq!(named(ATTACK, WAIT), ATTACK);
+        assert_eq!(named(STAFF, HEAL), STAFF);
+        assert_eq!(named(PAIR_UP, ATTACK), PAIR_UP);
+        assert_eq!(named(99, MOVE), MOVE);
     }
 
     #[test]
