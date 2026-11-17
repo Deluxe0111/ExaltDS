@@ -921,6 +921,8 @@ pub fn run(app: &AndroidApp) -> Result<(), String> {
                 device,
                 ..Config::default()
             };
+            // HD movies the player imported decode with MediaCodec
+            crate::movie_codec::install();
             let mut loaded =
                 zakuro_core::loader::load(&launch.game, config).map_err(|e| e.to_string())?;
             if settings.region >= 0 {

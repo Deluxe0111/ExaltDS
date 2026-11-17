@@ -25,6 +25,10 @@ mod pages;
 #[cfg(target_os = "android")]
 mod recall;
 #[cfg(target_os = "android")]
+mod movie_codec;
+#[cfg(target_os = "android")]
+mod hd_import;
+#[cfg(target_os = "android")]
 mod setup;
 #[cfg(target_os = "android")]
 mod runtime;

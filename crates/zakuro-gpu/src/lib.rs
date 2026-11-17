@@ -12,6 +12,7 @@ pub mod fog;
 pub mod format;
 mod interpolation;
 pub mod lighting;
+pub mod movie;
 pub mod pack;
 pub mod raster;
 pub mod registers;

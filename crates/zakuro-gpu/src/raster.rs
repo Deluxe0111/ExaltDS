@@ -1477,6 +1477,8 @@ struct BoundTexture {
     /// the texture pack's picture for it, which the host's GPU draws with
     /// in its place once it has been read.
     replacement: Option<Arc<crate::pack::Material>>,
+    /// the HD movie frame drawn in its place, see movie.rs.
+    movie: Option<Arc<crate::movie::Frame>>,
     /// how many sizes the texels hold, each half the last.
     levels: u32,
     lod: Lod,
@@ -2094,6 +2096,7 @@ fn empty_texture() -> BoundTexture {
         height: 1,
         border: [0.0; 4],
         replacement: None,
+        movie: None,
         levels: 1,
         lod: Lod::default(),
     }
@@ -2157,6 +2160,12 @@ fn bind_texture<M: GpuMemory>(
         },
     };
 
+    // a movie frame the game converted through y2r, drawn from the player's
+    // HD movies instead when they have the frame
+    let movie = match (drawn, format) {
+        (None, crate::texture::TextureFormat::Rgb8) => crate::movie::frame_for(&texels, width, height),
+        _ => None,
+    };
     // filter mode in bit 1 (magnification) and 2 (minification), the wrap
     // modes for T and S in bits 8-10 and 12-14.
     let config = registers[base + 2];
@@ -2172,6 +2181,7 @@ fn bind_texture<M: GpuMemory>(
         border: registers[base].to_le_bytes().map(|c| c as f32 / 255.0),
         // a buffer drawn into is the GPU's, not a pack's picture
         replacement: replacement.filter(|_| drawn.is_none()),
+        movie,
         levels,
         lod: Lod::read(registers, base, levels),
     })
@@ -4118,6 +4128,7 @@ mod tests {
             height: 8,
             border: RED,
             replacement: None,
+            movie: None,
             levels: 1,
             lod: Lod::default(),
         };

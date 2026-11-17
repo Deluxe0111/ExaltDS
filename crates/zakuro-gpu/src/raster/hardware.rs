@@ -1385,6 +1385,24 @@ const RING_PICTURE: u64 = 4 << 20;
 /// batches a picture goes unused before it goes to make room for others,
 /// when they take most of the room they may, otherwise they stay.
 const REPLACED_IDLE: u64 = 60;
+/// HD movie pictures go into a few images the size of a movie's canvas,
+/// reused in turn, through a few staging buffers, each reused once no batch
+/// in flight can still be reading it: making an image and a staging buffer
+/// for every picture, 30 a second, cost the frame that did it 12-17 ms on
+/// an Adreno 740. both go once no movie has been drawn for a while.
+const MOVIE_IMAGES: usize = 6;
+const MOVIE_STAGING: usize = 4;
+const MOVIE_REUSE: u64 = IN_FLIGHT as u64 + 2;
+const MOVIE_IDLE: u64 = 600;
+
+/// an image holding an HD movie picture in its top-left.
+struct MovieImage {
+    /// the frame it holds, none while it holds none.
+    id: Option<u64>,
+    image: Image,
+    size: (u32, u32),
+    used: u64,
+}
 
 /// batches a picture read for a texture no longer drawn waits to be
 /// uploaded before the memory it takes goes.
@@ -2087,6 +2105,12 @@ pub struct Hardware {
     copies: QuickMap<DrawnTexture, Copied>,
     /// texture pack pictures, by the hash of the textures they replace.
     replaced: HashMap<u64, Replaced>,
+    /// HD movie pictures, see movie.rs and MOVIE_IMAGES: the images, the
+    /// staging buffers with the batch that last used each, and how long the
+    /// uploads took on this thread, how many, in all and the longest.
+    movie_images: Vec<MovieImage>,
+    movie_staging: Vec<(Buffer, u64)>,
+    movie_uploads: (u32, std::time::Duration, std::time::Duration),
     /// the bytes those take, and how many they may, half the GPU's memory.
     replaced_bytes: u64,
     replaced_budget: u64,
@@ -2364,6 +2388,9 @@ impl Hardware {
                 textures: QuickMap::default(),
                 copies: QuickMap::default(),
                 replaced: HashMap::new(),
+                movie_images: Vec::new(),
+                movie_staging: Vec::new(),
+                movie_uploads: Default::default(),
                 replaced_bytes: 0,
                 // half the GPU's own memory, up to 4 GiB, and a quarter, up
                 // to 2, of an integrated one's, which is the computer's
@@ -3553,6 +3580,11 @@ impl Hardware {
     fn texture(&mut self, bound: &BoundTexture) -> Result<(vk::ImageView, Option<u32>), String> {
         let _timed = crate::timed(3);
         let size = (bound.width, bound.height);
+        if let Some(frame) = &bound.movie {
+            if let Some(view) = self.movie_image(frame) {
+                return Ok((view, Some(0)));
+            }
+        }
         if let Some((view, smallest)) = bound.replacement.as_ref().and_then(|material| self.replacement(material, size)) {
             return Ok((view, Some(smallest)));
         }
@@ -3600,6 +3632,108 @@ impl Hardware {
         let view = image.view;
         self.textures.insert(key, Texture { image, _texels: bound.texels.clone(), used: self.batch });
         Ok((view, None))
+    }
+
+    /// the image of an HD movie picture, uploaded the first time it is drawn,
+    /// at once, as a movie frame is on screen for a frame or two, into the
+    /// top-left of an image the size of the movie's canvas. none when it
+    /// can't be, and the frame the title decoded is drawn.
+    fn movie_image(&mut self, frame: &crate::movie::Frame) -> Option<vk::ImageView> {
+        let batch = self.batch;
+        if let Some(held) = self.movie_images.iter_mut().find(|held| held.id == Some(frame.id)) {
+            held.used = batch;
+            return Some(held.image.view);
+        }
+        let started = std::time::Instant::now();
+        let picture = &frame.picture;
+        let ((width, height), canvas) = ((picture.width, picture.height), frame.canvas);
+        if canvas.0 > self.max_image_size || canvas.1 > self.max_image_size || width > canvas.0 || height > canvas.1 {
+            return None;
+        }
+        self.mark(Work::Upload, false);
+        self.end_rendering();
+        // an image no batch in flight still draws, or a new one
+        let free = |used: u64| batch - used > MOVIE_REUSE;
+        let image = match self.movie_images.iter().position(|held| held.size == canvas && free(held.used)) {
+            Some(at) => at,
+            None if self.movie_images.len() < MOVIE_IMAGES => match self.movie_canvas(canvas) {
+                Ok(image) => {
+                    self.movie_images.push(MovieImage { id: None, image, size: canvas, used: batch });
+                    self.movie_images.len() - 1
+                }
+                Err(error) => {
+                    log::warn!("HD movies: no image for a picture, {error}");
+                    return None;
+                }
+            },
+            None => return None,
+        };
+        // and a staging buffer the same way
+        let bytes = picture.texels.len() as u64;
+        let staging = match self.movie_staging.iter().position(|(buffer, used)| buffer.size >= bytes && free(*used)) {
+            Some(at) => at,
+            None if self.movie_staging.len() < MOVIE_STAGING => match self.buffer(bytes, vk::BufferUsageFlags::TRANSFER_SRC, false) {
+                Ok(buffer) => {
+                    self.movie_staging.push((buffer, batch));
+                    self.movie_staging.len() - 1
+                }
+                Err(error) => {
+                    log::warn!("HD movies: no staging buffer for a picture, {error}");
+                    return None;
+                }
+            },
+            None => return None,
+        };
+        let (buffer, used) = &mut self.movie_staging[staging];
+        *used = batch;
+        // SAFETY: the buffer is mapped for at least the picture's size, and no
+        // batch in flight reads it
+        unsafe { std::ptr::copy_nonoverlapping(picture.texels.as_ptr(), buffer.mapped, picture.texels.len()) };
+        let source = buffer.buffer;
+        let held = &mut self.movie_images[image];
+        (held.id, held.used) = (Some(frame.id), batch);
+        let (target, view) = (held.image.image, held.image.view);
+        let region = [vk::BufferImageCopy::default()
+            .image_subresource(vk::ImageSubresourceLayers::default().aspect_mask(vk::ImageAspectFlags::COLOR).layer_count(1))
+            .image_extent(vk::Extent3D { width, height, depth: 1 })];
+        // SAFETY: recording, outside rendering, the region inside the buffer
+        // and the image, which no batch in flight reads
+        unsafe {
+            self.unfenced = true;
+            self.device.cmd_copy_buffer_to_image(self.commands, source, target, vk::ImageLayout::GENERAL, &region)
+        };
+        self.uploads = true;
+        let spent = started.elapsed();
+        let (count, total, worst) = &mut self.movie_uploads;
+        (*count, *total, *worst) = (*count + 1, *total + spent, (*worst).max(spent));
+        if *count == 120 {
+            log::info!(
+                "HD movies: 120 pictures uploaded, {:.2} ms each, {:.2} ms at most, {} images, {} staging buffers",
+                total.as_secs_f64() * 1000.0 / 120.0,
+                worst.as_secs_f64() * 1000.0,
+                self.movie_images.len(),
+                self.movie_staging.len()
+            );
+            self.movie_uploads = Default::default();
+        }
+        Some(view)
+    }
+
+    /// an image for HD movie pictures, black, as only the picture's corner
+    /// of it is ever written.
+    fn movie_canvas(&mut self, (width, height): (u32, u32)) -> Result<Image, String> {
+        let usage = vk::ImageUsageFlags::SAMPLED | vk::ImageUsageFlags::TRANSFER_DST;
+        let image = self.image_in(width, height, 1, COLOR_FORMAT, usage, vk::ImageAspectFlags::COLOR, false)?;
+        let range = [vk::ImageSubresourceRange::default().aspect_mask(vk::ImageAspectFlags::COLOR).level_count(1).layer_count(1)];
+        // SAFETY: recording, outside rendering, an image of ours in the
+        // general layout image_in leaves it in
+        unsafe {
+            self.unfenced = true;
+            self.device.cmd_clear_color_image(self.commands, image.image, vk::ImageLayout::GENERAL, &vk::ClearColorValue { float32: [0.0, 0.0, 0.0, 1.0] }, &range);
+        }
+        // the picture goes over the black
+        self.barrier();
+        Ok(image)
     }
 
     /// the image of a texture pack's picture for a texture of size, and
@@ -6635,6 +6769,15 @@ impl Hardware {
                 self.destroy_image(&texture.image);
             }
         }
+        // HD movie images and staging go once no movie has been drawn for a while
+        if self.movie_images.iter().all(|held| batch - held.used > MOVIE_IDLE) && self.movie_staging.iter().all(|(_, used)| batch - used > MOVIE_IDLE) {
+            for held in std::mem::take(&mut self.movie_images) {
+                self.destroy_image(&held.image);
+            }
+            for (buffer, _) in std::mem::take(&mut self.movie_staging) {
+                self.destroy_buffer(&buffer);
+            }
+        }
         for twin in [false, true] {
             let stale: Vec<DrawnTexture> = self.copies(twin).iter().filter(|(_, c)| batch - c.used > 600).map(|(&k, _)| k).collect();
             for key in stale {
@@ -7082,6 +7225,12 @@ impl Drop for Hardware {
             }
             for replaced in self.replaced.values() {
                 self.destroy_image(&replaced.image);
+            }
+            for held in &self.movie_images {
+                self.destroy_image(&held.image);
+            }
+            for (buffer, _) in &self.movie_staging {
+                self.destroy_buffer(buffer);
             }
             for (_, buffer) in &self.staged {
                 self.destroy_buffer(buffer);

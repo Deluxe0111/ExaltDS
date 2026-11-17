@@ -7,7 +7,10 @@ param(
     [string]$BuildTools = '36.0.0',
     [string]$Platform = 'android-37.0',
     # zakuroishi (the library app) or exalt (ExaltDS: its own package, android/exalt manifest and resources)
-    [ValidateSet('zakuroishi','exalt')][string]$Flavor = 'zakuroishi'
+    [ValidateSet('zakuroishi','exalt')][string]$Flavor = 'zakuroishi',
+    # FFmpeg for arm64 Android (android/scripts/build-ffmpeg.sh's prefix): ships libexalt_ffmpeg.so and FFmpeg's
+    # libraries, which HD movie import decodes with; without it the import says it isn't available
+    [string]$FFmpeg = ''
 )
 $ErrorActionPreference = 'Stop'
 $PSNativeCommandUseErrorActionPreference = $false
@@ -100,6 +103,17 @@ try {
         '-p','zakuro-android','--lib','--features','zakuro-gpu/vulkan')
     Invoke-Tool "$ndkBin/llvm-strip.exe" @('-o',"$work/lib/arm64-v8a/libzakuro_android.so",
         "$env:CARGO_TARGET_DIR/aarch64-linux-android/release/libzakuro_android.so")
+    # HD movie import's decoding: FFmpeg's libraries (LGPL, dynamic) and the shim over them
+    if ($FFmpeg) {
+        $ffmpegLibraries = @('libavutil.so','libswscale.so','libavcodec.so','libavformat.so','libavfilter.so')
+        foreach ($library in $ffmpegLibraries) {
+            Invoke-Tool "$ndkBin/llvm-strip.exe" @('-o',"$work/lib/arm64-v8a/$library","$FFmpeg/lib/$library")
+        }
+        Invoke-Tool "$ndkBin/clang.exe" @('--target=aarch64-linux-android30','-O2','-fPIC','-shared','-fvisibility=hidden',
+            "-I$FFmpeg/include","-L$FFmpeg/lib",'-o',"$work/libexalt_ffmpeg.so","$repo/crates/zakuro-android/ffmpeg/hdmovies.c",
+            '-lavformat','-lavcodec','-lavfilter','-lavutil','-Wl,-soname,libexalt_ffmpeg.so','-Wl,-z,max-page-size=16384')
+        Invoke-Tool "$ndkBin/llvm-strip.exe" @('-o',"$work/lib/arm64-v8a/libexalt_ffmpeg.so","$work/libexalt_ffmpeg.so")
+    }
     $manifest = Join-Path $repo "$appDir/AndroidManifest.xml"
     $sources = @(Get-ChildItem "$repo/android/app/src/main/java" -Filter '*.java' -Recurse | Sort-Object FullName | ForEach-Object FullName)
     if (!$sources.Count) { throw 'No Java sources' }
@@ -122,6 +136,7 @@ try {
     foreach ($license in @('ADRENOTOOLS','LINKERNSBYPASS','LSFG','ZAKURO')) {
         Copy-Item -LiteralPath "$repo/android/app/src/main/assets/licenses/$license.txt" -Destination "$work/assets/licenses/$license.txt"
     }
+    if ($FFmpeg) { Copy-Item -LiteralPath "$FFmpeg/LICENSE-FFMPEG.txt" -Destination "$work/assets/licenses/FFMPEG.txt" }
     # ExaltDS's on-device compiler (android/exalt/clang-kit.py): programs and libraries for lib/,
     # headers and runtime in assets/clang-kit.zip, LLVM's license
     if ($Flavor -eq 'exalt') {
@@ -198,6 +213,12 @@ try {
         $allowedAssets = @('assets/licenses/ADRENOTOOLS.txt','assets/licenses/LINKERNSBYPASS.txt','assets/licenses/LSFG.txt','assets/licenses/ZAKURO.txt')
         # ExaltDS's compiler kit (headers and runtime only: no game data)
         if ($Flavor -eq 'exalt') { $allowedAssets += @('assets/clang-kit.zip','assets/licenses/LLVM.txt','assets/licenses/EXALT-MODS.txt') }
+        if ($FFmpeg) {
+            $allowedAssets += 'assets/licenses/FFMPEG.txt'
+            foreach ($library in @('libexalt_ffmpeg.so','libavutil.so','libswscale.so','libavcodec.so','libavformat.so','libavfilter.so')) {
+                if ("lib/arm64-v8a/$library" -notin $entries) { throw "HD movie decoding missing: $library" }
+            }
+        }
         if (@($entries | Where-Object { $_ -match '^assets/' -and !$_.EndsWith('/') -and $_ -notin $allowedAssets }).Count) { throw 'Unexpected bundled assets' }
         if (@($entries | Where-Object { $_ -match '\.(dll|spv|dxbc)$' }).Count) { throw 'Shader or DLL files in the APK' }
         if ('lib/arm64-v8a/liblsfg_bridge.so' -notin $entries) { throw 'Frame generation bridge missing' }

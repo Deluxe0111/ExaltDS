@@ -24,7 +24,7 @@ import java.util.*;
  * frame rate, 16:9, feet, resolution, HD textures, mods and the GPU driver.
  */
 final class Sidebar {
-    static final int PICK_MOD = 0x5100, PICK_DRIVER = 0x5101, PICK_CODE = 0x5102, PICK_ZIP = 0x5103, EXPORT_SAVES = 0x5104, IMPORT_SAVES = 0x5105;
+    static final int PICK_MOD = 0x5100, PICK_DRIVER = 0x5101, PICK_CODE = 0x5102, PICK_ZIP = 0x5103, EXPORT_SAVES = 0x5104, IMPORT_SAVES = 0x5105, PICK_VIDEO = 0x5106;
     private static final String[] COMBAT = {"30 fps (original)", "60 fps, original speed", "60 fps, faster"};
     private static final String[] PERF = {"Off", "FPS", "FPS + frame time", "FPS + frame time + temps"};
 
@@ -36,7 +36,7 @@ final class Sidebar {
     private View scrim;
     private LinearLayout panel, main, mods, drivers;
     private ScrollView scroll;
-    private boolean open, handedOff, busy;
+    private boolean open, handedOff, busy, movieImport;
     private GameSettings s;
     /** what this run started with, to tell which changes need a restart */
     private final String started;
@@ -382,7 +382,9 @@ final class Sidebar {
         mods.addView(row("Import from folder…", v -> pick(PICK_MOD)));
         mods.addView(row("Remove a mod…", v -> removeMod()));
         mods.addView(row("Remove texture pack…", v -> removePack()));
-        TextView note = text("Choose ZIPs as downloaded (several at once is fine) or an extracted folder. A mod holds a romfs folder (like the feet mod); a texture pack holds PNG pictures and is added to the installed pack. Changes apply after Apply and restart.", 12, Exalt.MUTED);
+        mods.addView(row("HD movies from your video…", v -> pickVideo()));
+        mods.addView(row("Remove HD movies…", v -> removeMovies()));
+        TextView note = text("Choose ZIPs as downloaded (several at once is fine) or an extracted folder. A mod holds a romfs folder (like the feet mod); a texture pack holds PNG pictures and is added to the installed pack. HD movies: choose your own video of the game's anime movies (a disc rip or a recording); ExaltDS finds each movie in it and plays it in place of the game's. That takes a while. Changes apply after Apply and restart.", 12, Exalt.MUTED);
         note.setPadding(px(20), px(8), px(20), px(12));
         mods.addView(note);
     }
@@ -392,8 +394,10 @@ final class Sidebar {
         List<Exalt.Layer> layers = Exalt.list(game, id);
         for (Exalt.Layer l : layers)
             modsList.addView(check(l.name, l.on, on -> { Exalt.setOn(game, id, l.name, on); modsChanged = true; refreshApply(); }));
+        if (movieImport) return; // the import shows its progress there
         modsStatus.setText((layers.isEmpty() ? "No mods imported." : layers.size() + (layers.size() == 1 ? " mod." : " mods."))
-                + "\nHD texture pack: " + (hasPack() ? (s.textures ? "installed, on" : "installed, off") : "none"));
+                + "\nHD texture pack: " + (hasPack() ? (s.textures ? "installed, on" : "installed, off") : "none")
+                + "\nHD movies: " + (ExaltMovies.installed(game, id) ? "installed" : "none"));
     }
 
     private void recallFate() {
@@ -537,7 +541,62 @@ final class Sidebar {
     }
 
     /** True when the result was one of the sidebar's pickers. */
+    // ---- HD movies from the player's video (ExaltMovies) ----
+
+    private void pickVideo() {
+        if (busy) { toast("Another import is running."); return; }
+        String why = ExaltMovies.unavailable();
+        if (why != null) { toast(why); return; }
+        Intent intent = new Intent(Intent.ACTION_OPEN_DOCUMENT).setType("video/*").addCategory(Intent.CATEGORY_OPENABLE)
+                .addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION);
+        try { game.startActivityForResult(intent, PICK_VIDEO); }
+        catch (android.content.ActivityNotFoundException e) { toast("No file picker is available."); }
+    }
+
+    private void importVideo(Uri uri) {
+        busy = true; movieImport = true;
+        importStatus("HD movies: starting…");
+        Thread worker = new Thread(() -> {
+            String message;
+            try { message = "HD movies imported. " + ExaltMovies.importFrom(game, id, uri) + " Apply and restart to see them."; }
+            catch (Exception e) { message = "HD movie import failed: " + e.getMessage(); }
+            String done = message;
+            game.runOnUiThread(() -> {
+                busy = false; movieImport = false;
+                if (done.startsWith("HD movies imported")) modsChanged = true;
+                toast(done);
+                if (open) { refreshMods(); refreshApply(); }
+            });
+        }, "exalt-hd-movies");
+        worker.start();
+        // the native side's progress, until it ends
+        new Thread(() -> {
+            while (worker.isAlive()) {
+                String now = ExaltMovies.status();
+                if (now != null && !now.isEmpty()) importStatus("HD movies: " + now);
+                try { Thread.sleep(500); } catch (InterruptedException e) { return; }
+            }
+        }, "exalt-hd-movies-status").start();
+    }
+
+    private void removeMovies() {
+        if (busy) { toast("An import is running."); return; }
+        if (!ExaltMovies.installed(game, id)) { toast("No HD movies are installed."); return; }
+        AlertDialog d = new AlertDialog.Builder(game, game.palette().dialogTheme()).setTitle("Remove HD movies")
+                .setMessage("Remove the HD movies? The game plays its own movies again. Import them from your video to get them back.")
+                .setPositiveButton("Remove", (x, w) -> {
+                    if (ExaltMovies.remove(game, id)) { modsChanged = true; toast("HD movies removed."); }
+                    refreshMods(); refreshApply();
+                })
+                .setNegativeButton("Cancel", null).create();
+        d.show(); game.palette().dialog(d, false);
+    }
+
     boolean result(int request, int code, Intent data) {
+        if (request == PICK_VIDEO) {
+            if (code == android.app.Activity.RESULT_OK && data != null && data.getData() != null && !busy) importVideo(data.getData());
+            return true;
+        }
         if (request == EXPORT_SAVES || request == IMPORT_SAVES) {
             if (code == android.app.Activity.RESULT_OK && data != null && data.getData() != null && !busy) {
                 if (request == EXPORT_SAVES) exportTo(data.getData()); else importFrom(data.getData());

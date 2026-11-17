@@ -241,6 +241,18 @@ pub fn load(path: impl AsRef<std::path::Path>, mut config: Config) -> Result<Sys
             system.gpu.set_texture_pack(Some(std::sync::Arc::new(pack)));
         }
     }
+    // HD movies the player imported from their own copy, drawn in place of
+    // the title's movie frames, see zakuro_gpu::movie
+    zakuro_gpu::movie::set(None);
+    if let Some(data_dir) = system.config.data_dir.as_deref().filter(|_| system.config.texture_packs) {
+        let dir = crate::mods::dir(data_dir, title.program_id()).join("movies");
+        if dir.join("movies.json").exists() {
+            match on_gpu {
+                true => zakuro_gpu::movie::set(zakuro_gpu::movie::Movies::open(&dir).map(std::sync::Arc::new)),
+                false => log::warn!("the HD movies in {} need the 3D drawn on the GPU, they are left out", dir.display()),
+            }
+        }
+    }
 
     system.title = Some(title);
     Ok(system)

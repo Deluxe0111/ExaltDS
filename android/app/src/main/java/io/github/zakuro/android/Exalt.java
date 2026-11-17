@@ -164,6 +164,28 @@ final class Exalt {
         return null;
     }
 
+    private static boolean hasFile(ImportPlan.Source s, ImportPlan.Entry at, String name) throws IOException {
+        for (ImportPlan.Entry d : s.children(at.id)) if (!d.directory && d.name.equalsIgnoreCase(name)) return true;
+        return false;
+    }
+
+    /** Copies HD movies into the game's mods folder (mods/<id>/movies), replacing any there; they play from the next start. */
+    static String importMovies(Context c, String id, ImportPlan.Source source, ImportPlan.Entry movies, GameImport.Progress progress) throws Exception {
+        File parent = GameImport.modsDir(GameImport.active(c, id), id);
+        GameImport.mkdir(parent);
+        File stage = new File(parent, "movies.exalt-new"), target = new File(parent, "movies");
+        GameImport.remove(stage);
+        long[] done = {0, 0};
+        try {
+            copy(source, movies, stage, done, progress, 0);
+            synchronized (GameImport.POINTER_LOCK) {
+                GameImport.remove(target);
+                Files.move(stage.toPath(), target.toPath());
+            }
+        } finally { GameImport.remove(stage); }
+        return "HD movies imported (" + done[1] + " files). They play from the next start of the game.";
+    }
+
     private static boolean hasPng(ImportPlan.Source s, ImportPlan.Entry at, int depth) throws IOException {
         for (ImportPlan.Entry d : s.children(at.id)) {
             if (!d.directory && d.name.toLowerCase(Locale.ROOT).endsWith(".png")) return true;
@@ -201,6 +223,13 @@ final class Exalt {
                 }
                 source = new GameImport.DocumentsSource(r, uri);
                 root = new ImportPlan.Entry(rootId, rootName, true, -1);
+            }
+            // HD movies made from the player's own video (tools/hd-movies): a folder holding movies.json
+            ImportPlan.Entry movies = hasFile(source, root, "movies.json") ? root : findNamed(source, root, 2, "movies");
+            if (movies != null && hasFile(source, movies, "movies.json")) {
+                picked.done = importMovies(c, id, source, movies, progress);
+                picked.close();
+                return picked;
             }
             ImportPlan.Entry romfs = root.name.equalsIgnoreCase("romfs") ? root : findNamed(source, root, 2, "romfs");
             ImportPlan.Entry textures = romfs == root ? null : findNamed(source, root, 2, "textures");

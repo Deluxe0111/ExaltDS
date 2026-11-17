@@ -27,6 +27,20 @@ public final class DebugSettings extends BroadcastReceiver {
             }
             String transfer = intent.getStringExtra("transfer");
             if (transfer != null) { setResult(0, transfer(context, id, transfer), null); return; }
+            // --es hdimport <file>: HD movies from a video in the transfer folder (transfer/<id>/<file>), on a thread;
+            // its progress and result go to logcat ("HD movie import")
+            String video = intent.getStringExtra("hdimport");
+            if (video != null) {
+                java.io.File file = new java.io.File(context.getExternalFilesDir(null), "transfer/" + id + "/" + new java.io.File(video).getName());
+                if (!file.isFile()) throw new IllegalArgumentException("no " + file);
+                Context app = context.getApplicationContext(); String game = id;
+                new Thread(() -> {
+                    try { android.util.Log.i("Zakuro", "HD movie import: done. " + ExaltMovies.importPath(app, game, file.getPath())); }
+                    catch (Exception e) { android.util.Log.e("Zakuro", "HD movie import: failed: " + e.getMessage()); }
+                }, "exalt-hd-movies").start();
+                setResult(0, "{\"hdimport\":\"" + file + "\"}", null);
+                return;
+            }
             GameSettings settings = GameSettings.load(context, id);
             String set = intent.getStringExtra("set");
             if (set != null) {
@@ -45,6 +59,7 @@ public final class DebugSettings extends BroadcastReceiver {
      * {@code --es transfer out} copies the game's in-game saves and save states to this app's external files
      * (Android/data/<package>/files/transfer/<id>/{user,states}), where adb can pull them; {@code in} copies them back
      * from there, replacing the current ones. Moves a game's saves between Zakuroishi and ExaltDS. Close the game first.
+     * {@code movies} copies HD movies (transfer/<id>/movies, made by tools/hd-movies) into the game's mods folder alone.
      */
     private static String transfer(Context context, String id, String direction) {
         try (SaveArchive.Guard ignored = SaveArchive.lock(context.getFilesDir(), id)) {
@@ -60,7 +75,13 @@ public final class DebugSettings extends BroadcastReceiver {
                 File inUser = new File(outside, "user"), inStates = new File(outside, "states");
                 if (inUser.isDirectory()) { GameImport.remove(user); GameImport.copyTree(inUser, user); }
                 if (inStates.isDirectory()) { GameImport.remove(states); GameImport.copyTree(inStates, states); }
-            } else throw new IllegalArgumentException("transfer must be out or in");
+            } else if (direction.equals("movies")) {
+                File inMovies = new File(outside, "movies");
+                if (!new File(inMovies, "movies.json").isFile()) throw new IllegalArgumentException("no movies.json in " + inMovies);
+                File movies = new File(GameImport.modsDir(GameImport.active(context, id), id), "movies");
+                GameImport.remove(movies);
+                GameImport.copyTree(inMovies, movies);
+            } else throw new IllegalArgumentException("transfer must be out, in or movies");
             return "{\"transfer\":\"" + direction + "\",\"path\":\"" + outside + "\"}";
         } catch (IllegalArgumentException e) { throw e; }
         catch (Exception e) { throw new IllegalArgumentException("transfer failed: " + e); }
