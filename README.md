@@ -36,9 +36,11 @@ ExaltDS contains **no game files**. You need your own legally obtained, decrypte
 
 ## Recall Fate
 
+<p align="center"><img src="docs/screenshots/exaltds-recall-fate-intro.jpg" alt="Robin and Chrom's introduction to Recall Fate" width="720"></p>
+
 Fire Emblem is a game of consequences, and sometimes you want to see how it would have gone. Recall Fate adds a new
-entry to the battle map menu that lists every turn and every action of the current battle, each named after what
-happened: *Frederick - Separate*, *Lissa - Pair Up*, *Robin - Wait*. Pick one and the battle returns to just before it.
+entry to the battle map menu, similar to Mila's Turnwheel or the Time Crystal, that lists every turn and every action of the current battle, each named after what
+happened: Pick one and the battle returns to just before it.
 
 - Go back to before any earlier action or turn, not only the last one.
 - Rewind the last five turns of a battle.
@@ -46,9 +48,7 @@ happened: *Frederick - Separate*, *Lissa - Pair Up*, *Robin - Wait*. Pick one an
 
 A short scene between Robin and Chrom introduces it the first time you reach the world map.
 
-<p align="center"><img src="docs/screenshots/exaltds-recall-fate-intro.jpg" alt="Robin and Chrom's introduction to Recall Fate" width="720"></p>
-
-Recall Fate is on by default. You can turn it off during setup, or later in the sidebar (this needs a restart).
+Recall Fate (Naga's Tear) is on by default. You can turn it off during setup, or later in the sidebar (this needs a restart).
 It's still experimental, so keep regular saves as you normally would.
 
 ## Clean, bright 3D
