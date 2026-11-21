@@ -166,6 +166,12 @@ impl HostArchive {
         file.set_len(size).map_err(io_error)
     }
 
+    /// the same archive under another user folder (a saved state's, made where the user folder
+    /// was then, loaded where it is now); None when the root is not under a user folder
+    pub fn rebased(&self, user_dir: &Path) -> Option<HostArchive> {
+        rebase(&self.root, user_dir).map(HostArchive::at)
+    }
+
     pub fn delete_file(&self, path: &str) -> Result<(), ResultCode> {
         let host = self.resolve(path)?;
         if !host.is_file() {
@@ -246,6 +252,22 @@ impl HostArchive {
 
 /// reads up to buffer.len() bytes at offset, returning how many were
 /// there to read.
+/// a host path of a writable archive, or a file in one, put under another user folder: what
+/// follows the user folder it was under (the first `user` component that one of the archives'
+/// own folders, savedata, extdata, nand or sdmc, comes right after; a later one is inside an
+/// archive) joined to `user_dir`. None for a path under no user folder.
+pub fn rebase(path: &Path, user_dir: &Path) -> Option<PathBuf> {
+    use std::path::Component;
+    let parts: Vec<Component> = path.components().collect();
+    let at = (0..parts.len().saturating_sub(1)).find(|&i| {
+        parts[i].as_os_str() == "user"
+            && matches!(parts[i + 1].as_os_str().to_str(), Some("savedata" | "extdata" | "nand" | "sdmc"))
+    })?;
+    let mut rebased = user_dir.to_path_buf();
+    rebased.extend(&parts[at + 1..]);
+    Some(rebased)
+}
+
 pub fn read_at(path: &Path, offset: u64, buffer: &mut [u8]) -> usize {
     let Ok(mut file) = std::fs::File::open(path) else {
         return 0;
@@ -301,6 +323,23 @@ fn io_error(error: std::io::Error) -> ResultCode {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_saved_states_archives_move_to_this_runs_user_folder() {
+        let old = Path::new("/files/imports/d2a7/data/user");
+        let now = Path::new("/files/imports/3ec6/data/user");
+        let save = HostArchive::save_data(old, 0x0004_0000_000A_0500);
+        assert_eq!(save.rebased(now), Some(HostArchive::save_data(now, 0x0004_0000_000A_0500)));
+        let file = old.join("savedata/00040000000A0500/Chapter0");
+        assert_eq!(rebase(&file, now), Some(now.join("savedata/00040000000A0500/Chapter0")));
+        assert_eq!(rebase(&old.join("extdata/shared/0000000000000001"), now), Some(now.join("extdata/shared/0000000000000001")));
+        // a folder named user inside an archive is not the user folder
+        assert_eq!(rebase(&old.join("sdmc/user/savedata/x"), now), Some(now.join("sdmc/user/savedata/x")));
+        // Android's own /data/user/0 is not one
+        let android = Path::new("/data/user/0/io.github.exaltds/files/imports/d2a7/data/user/savedata/X");
+        assert_eq!(rebase(android, now), Some(now.join("savedata/X")));
+        assert_eq!(rebase(Path::new("/somewhere/else"), now), None);
+    }
 
     fn scratch(name: &str) -> PathBuf {
         let dir = std::env::temp_dir().join(format!("zakuro-archive-{name}-{}", std::process::id()));

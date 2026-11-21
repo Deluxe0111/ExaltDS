@@ -207,6 +207,8 @@ impl System {
         self.services = saved.services;
         self.services.fs.user_dir = user_dir;
         self.services.fs.files = files;
+        // its saves where this run keeps them, not where the state was saved
+        self.services.fs.rebase();
         // the computer's camera on while the state has a camera capturing
         crate::services::cam::capturing(self);
         // and the microphone while it has a title sampling

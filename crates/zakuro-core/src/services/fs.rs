@@ -217,6 +217,32 @@ pub struct FsState {
     pub busy_until: [u64; 2],
 }
 
+impl FsState {
+    /// after a saved state is loaded: its open archives and files name host paths under the
+    /// user folder it was saved with, put under this run's. A state outlives its folder: the
+    /// Android app's data folder is a new one each time a game is set up again (the old one
+    /// deleted, its states moved along), and a state from before then read and wrote saves in
+    /// a folder that was gone: no save data, and the game's save error (ExaltDS, 2026-11-21).
+    pub fn rebase(&mut self) {
+        let user_dir = self.user_dir.clone();
+        for archive in self.archives.values_mut() {
+            if let Some(rebased) = archive.host.as_ref().and_then(|host| host.rebased(&user_dir)) {
+                if archive.host.as_ref() != Some(&rebased) {
+                    log::info!("fs: a loaded state's archive {:?} moved to {:?}", archive.host, rebased);
+                }
+                archive.host = Some(rebased);
+            }
+        }
+        for file in self.files.values_mut() {
+            if let FileBacking::Host(path) = &mut file.backing {
+                if let Some(rebased) = host_archive::rebase(path, &user_dir) {
+                    *path = rebased;
+                }
+            }
+        }
+    }
+}
+
 impl Default for FsState {
     fn default() -> Self {
         FsState {
