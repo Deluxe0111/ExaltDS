@@ -74,7 +74,11 @@ public final class Game extends NativeActivity {
     private android.app.Presentation secondDisplay;
     private int failedSecondDisplay = -1;
     public void closeSecondDisplay() { runOnUiThread(() -> {
-        if (secondDisplay != null) { failedSecondDisplay=secondDisplay.getDisplay().getDisplayId(); secondDisplay.dismiss(); secondDisplay=null; }
+        if (secondDisplay != null) {
+            failedSecondDisplay=secondDisplay.getDisplay().getDisplayId();
+            android.util.Log.w("Zakuro", "Second display " + failedSecondDisplay + " closed after a failure; skipped until a display changes or the game restarts");
+            secondDisplay.dismiss(); secondDisplay=null;
+        }
     }); }
     private final android.hardware.display.DisplayManager.DisplayListener displayListener = new android.hardware.display.DisplayManager.DisplayListener() {
         public void onDisplayAdded(int id) { failedSecondDisplay=-1; updateSecondDisplay(); }
@@ -94,7 +98,9 @@ public final class Game extends NativeActivity {
             if(candidate.getDisplayId()!=own && candidate.isValid()) { target=candidate; break; }
         if (secondDisplay != null && target != null && secondDisplay.getDisplay().getDisplayId() == target.getDisplayId() && target.isValid()) return;
         if (secondDisplay != null) { secondDisplay.dismiss(); secondDisplay = null; }
-        if (target == null || !target.isValid() || target.getDisplayId()==failedSecondDisplay) return;
+        if (target == null || !target.isValid()) { android.util.Log.i("Zakuro", "No second display for the bottom screen"); return; }
+        if (target.getDisplayId()==failedSecondDisplay) { android.util.Log.i("Zakuro", "Second display " + failedSecondDisplay + " failed before; not retried"); return; }
+        android.util.Log.i("Zakuro", "Bottom screen goes to display " + target.getDisplayId() + " (" + target.getName() + ")");
         android.app.Presentation presentation = new android.app.Presentation(this,target);
         android.view.SurfaceView surface = new android.view.SurfaceView(presentation.getContext());
         surface.getHolder().addCallback(new android.view.SurfaceHolder.Callback() {
@@ -112,7 +118,10 @@ public final class Game extends NativeActivity {
         presentation.setContentView(surface);
         presentation.getWindow().addFlags(WindowManager.LayoutParams.FLAG_NOT_FOCUSABLE | WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON);
         try { presentation.show(); secondDisplay=presentation; }
-        catch (WindowManager.InvalidDisplayException e) { presentation.dismiss(); showNativeMessage("Second display disconnected. Using the main display."); }
+        catch (WindowManager.InvalidDisplayException e) {
+            android.util.Log.w("Zakuro", "Second display " + target.getDisplayId() + " refused the bottom screen", e);
+            presentation.dismiss(); showNativeMessage("The second display refused the bottom screen. Using the main display.");
+        }
     }
     private android.content.Intent pendingRestart;
     private int touchMask;

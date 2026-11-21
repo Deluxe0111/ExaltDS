@@ -29,6 +29,34 @@ use zakuro_gpu::{
 // Keep a NativeWindow reference until its Vulkan surface has been destroyed.
 struct Window(NativeWindow);
 /// A fixed 60 Hz source lets a 120 Hz panel hold an even 2-vsync cadence.
+/// How many times one second-display window's surface is rebuilt after present errors.
+const SECOND_REBUILDS: u32 = 3;
+
+/// A new surface and swapchain for a second display whose presenter failed. The old one
+/// (its VkSurfaceKHR, swapchain and any own device) is destroyed first, since a window
+/// takes only one surface. On the shared device if given, else on GPU readback.
+fn rebuild_second(
+    old: Surface,
+    shared: Option<std::sync::Arc<zakuro_gpu::SharedDevice>>,
+    entry: ash::Entry,
+) -> Result<Surface, String> {
+    let window = old.window.0.clone();
+    let settings = old.settings.clone();
+    drop(old);
+    if let Some(device) = shared {
+        match Surface::with_shared(window.clone(), &settings, device) {
+            Ok(again) => {
+                log::info!("second display rebuilt: shown straight from the GPU");
+                return Ok(again);
+            }
+            Err(error) => log::warn!("second display rebuild falls back to GPU readback, {error}"),
+        }
+    }
+    let again = Surface::new(window, &settings, entry)?;
+    log::info!("second display rebuilt on GPU readback");
+    Ok(again)
+}
+
 fn request_frame_rate(window: &Window, rate: f32) {
     // Exported by libnativewindow, not libandroid; ndk-sys alone leaves it unresolved at dlopen.
     #[link(name = "nativewindow")]
@@ -507,6 +535,8 @@ pub fn run(app: &AndroidApp) -> Result<(), String> {
     let mut second: Option<Surface> = None;
     // whether this second-display window already tried joining the renderer's device
     let mut second_join_tried = false;
+    // how often this second-display window's surface was rebuilt after a present error
+    let mut second_rebuilds = 0u32;
     // development A/B switch: adb shell setprop debug.zakuro.second_readback 1
     let force_second_readback = platform::system_property(c"debug.zakuro.second_readback").as_deref() == Some("1");
     let mut recall = crate::recall::Recall::new();
@@ -813,6 +843,7 @@ pub fn run(app: &AndroidApp) -> Result<(), String> {
         if let Some(window) = bridge::second_surface() {
             second = None;
             second_join_tried = false;
+            second_rebuilds = 0;
             if settings.dual_display {
                 if let Some(window) = window {
                     let external_settings = geometry::display(&settings, true, true);
@@ -1135,17 +1166,39 @@ pub fn run(app: &AndroidApp) -> Result<(), String> {
             }
             if let Some(external) = &mut second {
                 // Separate Vulkan devices cannot consume the main renderer's image views.
-                if let Err(error) = external.present(
+                let presented = external.present(
                     system,
                     (settings.right_stick == RightStick::Cursor).then_some(input.cursor),
                     repeats,
-                ) {
-                    if !matches!(error, PresentError::OutOfDate) {
-                        platform::message(app, &format!("Second display disconnected: {error}"));
-                        second = None;
-                        s.configure(&geometry::display(&settings, false, false));
-                        bridge::clear_input();
-                        platform::close_second_display(app);
+                );
+                // OutOfDate already recreated the swapchain
+                if let Some(error) = presented.err().filter(|e| !matches!(e, PresentError::OutOfDate)) {
+                    // A lost surface (VK_ERROR_SURFACE_LOST_KHR) is usually recoverable: make a new
+                    // VkSurfaceKHR and swapchain on the same window, on GPU readback if the shared
+                    // device will not take it again. Only a few times per window, so a dead
+                    // display cannot rebuild every frame.
+                    let old = second.take().expect("the second display is presenting");
+                    let rebuilt = (second_rebuilds < SECOND_REBUILDS)
+                        .then(|| {
+                            second_rebuilds += 1;
+                            log::warn!("second display: {error}; rebuilding its surface ({second_rebuilds}/{SECOND_REBUILDS})");
+                            let shared = (old.shared && !settings.gpu_readback && !force_second_readback)
+                                .then(|| s.presenter.shared_device())
+                                .flatten();
+                            rebuild_second(old, shared, driver.entry.clone())
+                        });
+                    match rebuilt {
+                        Some(Ok(again)) => second = Some(again),
+                        rebuilt => {
+                            let reason = match rebuilt {
+                                Some(Err(rebuild)) => format!("{error}; rebuilding it failed: {rebuild}"),
+                                _ => error.to_string(),
+                            };
+                            platform::message(app, &format!("Second display disconnected: {reason}"));
+                            s.configure(&geometry::display(&settings, false, false));
+                            bridge::clear_input();
+                            platform::close_second_display(app);
+                        }
                     }
                 }
             }
