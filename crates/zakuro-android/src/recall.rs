@@ -338,11 +338,10 @@ impl Recall {
         if self.saved != Some(turn) {
             self.saved = Some(turn);
             self.units = units;
-            // a battle already in a player phase when first seen (a state loaded there) is not
-            // saved halfway through the phase; its next player phase is
-            if !first_look {
-                self.checkpoint(system, turn, "turn");
-            }
+            // a battle first seen partway through a player phase (a save state or suspend loaded
+            // there) is saved as it is, so the rest of that turn can be recalled too (before
+            // 2026-11-19 nothing was kept until the next player phase)
+            self.checkpoint(system, turn, if first_look { "loaded" } else { "turn" });
             COMMAND.store(0, Ordering::Release);
             return;
         }

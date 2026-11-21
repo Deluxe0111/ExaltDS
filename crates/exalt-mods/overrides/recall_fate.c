@@ -29,7 +29,7 @@
  *   (vtable 0x49D5E0: 4 0x1F8384, 12 0x1C925C, 13 0x1F837C (B)), made for a dialog owner. (Map menu items cast
  *   their owner to SeparateMenu, which the dialog is not: rows of Guide's class crashed at
  *   0x1EDD44 on the Thor.)
- *   Each item made here carries a copy of its class's vtable (with the type-info word before it)
+ *   Each item made here carries a copy of its class's vtable (with the offset-to-top and type-info words before it)
  *   in its own allocation and points at that copy, so the overrides of those slots know it by its
  *   vtable lying inside it; the game's own items point at the fixed vtables. After the item's 0x38
  *   bytes: name text, help text, the row's turn, the vtable copy.
@@ -94,10 +94,16 @@
 #define RF_SHIFT 0xDCu       /* s32, how far a turn row's +0x14 is moved while it is drawn (0 otherwise) */
 #define RF_SPRITE_DESC 0xE0u /* 0x10 bytes, the sprite description (heap: no stack below sp in use) */
 #define RF_SPRITE_COLOUR 0xF0u /* u32, white */
-#define RF_VTABLE_COPY 0xF4u /* type-info word, then the vtable */
-/* the type-info word and slots 0-32: a map menu item's vtable runs that far (the menu calls slot
-   27, +0x6C, as it opens; a shorter copy crashed there), the Yes class's is shorter */
-#define RF_VTABLE_BYTES 0x88u
+#define RF_VTABLE_COPY 0xF4u /* offset-to-top and type-info words, then the vtable */
+#define RF_VTABLE_HEAD 8u    /* the two words before the vtable */
+/* the two words before the vtable and slots 0-32: a map menu item's vtable runs that far (the menu
+   calls slot 27, +0x6C, as it draws the row's plate; a shorter copy crashed there), the Yes class's
+   is shorter. The game's dynamic_cast (0x2F614C) reads both words before it (vtable[-2] the offset
+   to the whole object, vtable[-1] the type info): the map menu draws a row's plate (0x19D958) only
+   when the cast succeeds. Before 2026-11-19 only the type info was copied, the offset word being
+   whatever the heap left at +0xF0; Recall Fate lost its plate after Options (seen on the Thor;
+   taken to be the menu made again in used memory, not yet confirmed by a log) */
+#define RF_VTABLE_BYTES 0x8Cu
 #define RF_TITLE (RF_VTABLE_COPY + RF_VTABLE_BYTES) /* UTF-16, the list's title "Recall Fate (N left)" (the
                                                        map menu entry, which outlives the list, keeps it) */
 #define RF_TITLE_BYTES 0x40u
@@ -107,9 +113,12 @@
 /* the list sits on the left, as tall as the screen allows (rows beyond that scroll), its rows
    RF_ROW_WIDTH wide (the Yes class's slot 1, 0x1CE2C0, gives 80) with their text from the left */
 #define RF_LIST_X 8
-#define RF_LIST_TOP 8
+#define RF_LIST_TOP 8 /* the list has no title since 2026-11-21 (the HELP bar says what it is; the title
+                         went off the top once the list was full): its rows use the whole box */
 #define RF_LIST_BOTTOM 232
 #define RF_ROW_WIDTH 168
+#define RF_HELP_TOP 208      /* the HELP bar covers the top screen from here down (Thor screenshot, 935/1080 px) */
+#define RF_OFF_SCREEN (-0x400) /* a row's +0x14 while it is scrolled out of the list */
 #define RF_CENTRED 0x10u /* dialog +0x4C: the Yes rows' draw (0x1CE024) centres their text */
 /* an action row shows its unit's map sprite (as the game's unit list does) between the indent and
    the text: turn rows RF_TURN_HEIGHT tall and action rows RF_ACTION_HEIGHT (the Yes class's slot 2,
@@ -121,6 +130,8 @@
 #define RF_INDENT 6
 #define RF_SPRITE_X (-8) /* the box starts 8 px left of the row (0x1CE024) */
 #define RF_SPRITE_Y (-5)
+#define RF_MOUNTED_Y 3 /* a mounted unit's sprite goes this much lower: horse and rider stand taller in
+                          the frame, so the top half the row shows was mostly the rider's head */
 #define RF_SPRITE_DESCRIBE 0x002C785Cu /* (description, unit): the unit's sprite (class, army, name) */
 #define RF_SPRITE_DRAW 0x002E2150u     /* (manager, description, 0, 0; s0 x, s1 y, s2 0; [sp] colour *) */
 #define RF_SPRITE_MANAGER 0x004D56ACu  /* the unit sprite manager, as the unit list's 0x2E0DA8 passes it */
@@ -216,6 +227,14 @@ static void rf_command(uint8_t kind) { (void)kind; }
    as Engage's Time Crystal list does); 0 once the list closes */
 static uint32_t rf_list;
 static uint32_t rf_owner;
+/* the list's scrolling (rf_place): the list it is for, where its first shown row goes, and the
+   first row shown */
+static uint32_t rf_top_of;
+static int32_t rf_top;
+static uint32_t rf_scroll;
+static void rf_place(Context *ctx, uint32_t dialog, uint32_t cursor);
+static void rf_unshift(Context *ctx, uint32_t self);
+static int rf_mine(Context *ctx, uint32_t self);
 
 /* ---- guest helpers ---- */
 
@@ -228,8 +247,8 @@ static void rf_write_text(Context *ctx, uint32_t address, const char *text, uint
 /* an item of the class whose vtable is given, pointing at its own copy of that vtable */
 static void rf_init_item(Context *ctx, uint32_t item, uint32_t vtable) {
     for (uint32_t i = 0; i < RF_VTABLE_BYTES; i += 4)
-        mem_write32(ctx, item + RF_VTABLE_COPY + i, mem_read32(ctx, vtable - 4 + i));
-    mem_write32(ctx, item, item + RF_VTABLE_COPY + 4);
+        mem_write32(ctx, item + RF_VTABLE_COPY + i, mem_read32(ctx, vtable - RF_VTABLE_HEAD + i));
+    mem_write32(ctx, item, item + RF_VTABLE_COPY + RF_VTABLE_HEAD);
     mem_write32(ctx, item + 4, 0);
     mem_write32(ctx, item + 8, 0);
     mem_write32(ctx, item + 0x30, 0);
@@ -242,7 +261,7 @@ static void rf_init_item(Context *ctx, uint32_t item, uint32_t vtable) {
 
 /* whether this is an item made here */
 static int rf_mine(Context *ctx, uint32_t self) {
-    return self && mem_read32(ctx, self) == self + RF_VTABLE_COPY + 4;
+    return self && mem_read32(ctx, self) == self + RF_VTABLE_COPY + RF_VTABLE_HEAD;
 }
 
 static int rf_guest_equals(Context *ctx, uint32_t address, const char *text) {
@@ -470,12 +489,6 @@ RECOMP_OVERRIDE(0x001C9310) { /* slot 12: select, opens the turn list */
     if (inner) mem_write32(ctx, inner + 0x44, mem_read32(ctx, inner + 0x44) + 1);
     mem_write32(ctx, dialog + 0x4C, (mem_read32(ctx, dialog + 0x4C) | 0x4000000u) & ~RF_CENTRED);
     mem_write32(ctx, dialog + 0x110, 0xC0800000u); /* -4.0f */
-    char title[32];
-    snprintf(title, sizeof title, "Recall Fate (%u left)", (unsigned)rf_uses());
-    rf_write_text(ctx, self + RF_TITLE, title, RF_TITLE_BYTES);
-    ctx->r[0] = dialog;
-    ctx->r[1] = self + RF_TITLE;
-    RF_GUEST_CALL(RF_SET_TITLE, link);
     rf_log("turn list %08X open, %u rows, owner %08X, over %08X (%d open)", dialog, (unsigned)row_count, owner, inner,
            inner ? (int32_t)mem_read32(ctx, inner + 0x44) : 0);
 
@@ -596,7 +609,12 @@ RECOMP_OVERRIDE(0x0015C5C0) {
         mem_write32(ctx, dialog + 0x68, rows);
         mem_write32(ctx, dialog + 0x6C, 1);
         mem_write32(ctx, dialog + 0x74, 1);
-        /* the box is the rows' heights (each its own) plus the padding: as many rows as fit */
+        /* the box is the rows' heights (each its own) plus the padding: as many rows as fit. Its
+           height is the rows + the title's band (+0xC8, slot 7) + twice the edge (+0xBC); with no
+           title the band goes, so the rows start under the box's top edge */
+        rf_log("list %08X: title band %d, edge %d", dialog, (int32_t)mem_read32(ctx, dialog + 0xC8),
+               (int32_t)mem_read32(ctx, dialog + 0xBC));
+        mem_write32(ctx, dialog + 0xC8, 0);
         uint32_t items = mem_read32(ctx, dialog + 0x30);
         RF_SIZE_LIST(dialog, 1, link);
         int32_t first = mem_read32(ctx, mem_read32(ctx, items) + RF_ACTION_ROW) ? RF_ACTION_HEIGHT : RF_TURN_HEIGHT;
@@ -618,10 +636,94 @@ RECOMP_OVERRIDE(0x0015C5C0) {
                mem_read32(ctx, dialog + 0x70), rows, (int32_t)mem_read32(ctx, dialog + 0x60),
                (int32_t)mem_read32(ctx, dialog + 0x64), (int32_t)mem_read32(ctx, dialog + 0x58),
                (int32_t)mem_read32(ctx, dialog + 0x5C));
+    }
+    /* the game centres all the rows in the box (+0x128 = (box - padding - all rows - 48) / 2 + 24,
+       each row's +0x14 from it) and never scrolls: with more rows than fit, the first ones sat above
+       the box with the cursor on them (Thor, 2026-11-19). Laid out once with only the rows that fit,
+       the first row's place is where the list starts; then for all of them, and rf_scroll places
+       them (rf_place). */
+    uint32_t window = mem_read32(ctx, dialog + 0x70);
+    if (rows && rf_top_of != dialog && window && window < rows) {
+        mem_write32(ctx, dialog + 0x34, window);
         ctx->r[0] = dialog;
         ctx->r[14] = link;
+        CALL(RECOMP_ORIGINAL(0x0015C5C0));
+        mem_write32(ctx, dialog + 0x34, rows);
+        rf_top = (int32_t)mem_read32(ctx, mem_read32(ctx, mem_read32(ctx, dialog + 0x30)) + 0x14);
+        rf_top_of = dialog;
+        rf_scroll = 0;
+        rf_log("list %08X: rows start at %d", dialog, rf_top);
     }
-    TAIL_CALL(RECOMP_ORIGINAL(0x0015C5C0));
+    ctx->r[0] = dialog;
+    ctx->r[14] = link;
+    CALL(RECOMP_ORIGINAL(0x0015C5C0));
+    rf_place(ctx, dialog, mem_read32(ctx, dialog + 0x8C));
+    ctx->r[0] = dialog;
+    RETURN_TO(link);
+}
+
+/* the rows from rf_scroll that fit between rf_top and the box's inside bottom (or the HELP bar),
+   with the cursor's row among them; the others off the screen, where the menu draws nothing */
+/* whether this is the history list being scrolled: its first row one made here (a menu made later
+   at the same address is left alone) */
+static int rf_scrolled(Context *ctx, uint32_t dialog) {
+    if (!dialog || dialog != rf_top_of || !mem_read32(ctx, dialog + 0x34)) return 0;
+    uint32_t items = mem_read32(ctx, dialog + 0x30);
+    return items && rf_mine(ctx, mem_read32(ctx, items));
+}
+
+static void rf_place(Context *ctx, uint32_t dialog, uint32_t cursor) {
+    if (!rf_scrolled(ctx, dialog)) return;
+    uint32_t rows = mem_read32(ctx, dialog + 0x34), items = mem_read32(ctx, dialog + 0x30);
+    if (!rows || !items) return;
+    if (cursor >= rows) cursor = 0;
+    /* the inside of the box as the menu's draw clips it (0x2E1CF8) */
+    int32_t bottom = (int32_t)mem_read32(ctx, dialog + 0x5C) + (int32_t)mem_read32(ctx, dialog + 0x64) -
+                     (int32_t)mem_read32(ctx, dialog + 0xBC);
+    if (bottom > RF_HELP_TOP) bottom = RF_HELP_TOP;
+    int32_t room = bottom - rf_top;
+    for (uint32_t i = 0; i < rows; i++) rf_unshift(ctx, mem_read32(ctx, items + 4 * i));
+    /* +0x1C: a row's offset in its column (the heights of the rows before it) */
+#define RF_ROW_AT(i) ((int32_t)mem_read32(ctx, mem_read32(ctx, items + 4 * (i)) + 0x1C))
+#define RF_ROW_END(i) (RF_ROW_AT(i) + (int32_t)mem_read32(ctx, mem_read32(ctx, items + 4 * (i)) + 0x24))
+    if (rf_scroll >= rows) rf_scroll = 0;
+    if (cursor < rf_scroll) rf_scroll = cursor;
+    while (rf_scroll < cursor && RF_ROW_END(cursor) - RF_ROW_AT(rf_scroll) > room) rf_scroll++;
+    /* no gap at the bottom while earlier rows are hidden */
+    while (rf_scroll > 0 && RF_ROW_END(rows - 1) - RF_ROW_AT(rf_scroll - 1) <= room) rf_scroll--;
+    for (uint32_t i = 0; i < rows; i++) {
+        uint32_t item = mem_read32(ctx, items + 4 * i);
+        int32_t y = rf_top + RF_ROW_AT(i) - RF_ROW_AT(rf_scroll);
+        if (i < rf_scroll || rf_top + RF_ROW_END(i) - RF_ROW_AT(rf_scroll) > bottom) y = RF_OFF_SCREEN;
+        mem_write32(ctx, item + 0x14, (uint32_t)y);
+    }
+#undef RF_ROW_AT
+#undef RF_ROW_END
+}
+
+/* slot 36: where row r1 is (x into [r2], its middle y into [r3]), which the cursor heads for as it
+   moves (0x2C5BA0, when +0x8C changes). Before 2026-11-21 this hooked 0x15C4D0 (slot 10, an empty
+   function) instead, so the cursor went for a row's place before the rows were scrolled to it: off
+   the screen, for a row below those shown (Thor, 2026-11-21) */
+RECOMP_OVERRIDE(0x0015C4D4) {
+    uint32_t dialog = ctx->r[0];
+    if (LIKELY(!rf_scrolled(ctx, dialog))) TAIL_CALL(RECOMP_ORIGINAL(0x0015C4D4));
+    uint32_t r1 = ctx->r[1], r2 = ctx->r[2], r3 = ctx->r[3];
+    rf_place(ctx, dialog, r1);
+    ctx->r[0] = dialog;
+    ctx->r[1] = r1;
+    ctx->r[2] = r2;
+    ctx->r[3] = r3;
+    TAIL_CALL(RECOMP_ORIGINAL(0x0015C4D4));
+}
+
+/* the menus' draw (slot 39 of the list): its rows placed for the cursor first */
+RECOMP_OVERRIDE(0x002E1CF8) {
+    uint32_t dialog = ctx->r[0];
+    if (LIKELY(!rf_scrolled(ctx, dialog))) TAIL_CALL(RECOMP_ORIGINAL(0x002E1CF8));
+    rf_place(ctx, dialog, mem_read32(ctx, dialog + 0x8C));
+    ctx->r[0] = dialog;
+    TAIL_CALL(RECOMP_ORIGINAL(0x002E1CF8));
 }
 
 /* ---- the turn rows (the Yes class of End's dialog) ---- */
@@ -648,6 +750,8 @@ RECOMP_OVERRIDE(0x001F837C) {
     uint32_t self = ctx->r[0];
     if (LIKELY(!rf_mine(ctx, self))) TAIL_CALL(RECOMP_ORIGINAL(0x001F837C));
     rf_owner = 0; /* the list closes; the map menu shows again */
+    rf_list = 0;
+    rf_top_of = 0;
     ctx->r[0] = RF_BACK;
     RETURN_TO(ctx->r[14]);
 }
@@ -660,6 +764,8 @@ RECOMP_OVERRIDE(0x001C925C) { /* slot 12: select */
     /* the runtime restores it after this frame, menus and all */
     rf_go(id);
     rf_owner = 0;
+    rf_list = 0;
+    rf_top_of = 0;
     ctx->r[0] = RF_STAY;
     RETURN_TO(ctx->r[14]);
 }
@@ -705,6 +811,47 @@ RECOMP_OVERRIDE(0x00192730) {
    at a time and the game froze, Thor 2026-11-16).
    The sprite: every guest call here is made with sp as it came in and the caller's return as its
    return, except the sprite draw, which needs a stack argument: see RF_POP_R3_PC. */
+/* whether a unit rides a horse: its class's ID (Shift-JIS, from data/GameData.bin) is one of these.
+   The class is the unit's +0x68 (+0x64 is the person); its ID string is looked for among the class's
+   first words, the offset not being known (each unit's is logged the first time) */
+static const char *const rf_mounted_classes[] = {
+    "\x83\x5C\x83\x56\x83\x41\x83\x8B\x83\x69\x83\x43\x83\x67", /* Cavalier */
+    "\x83\x70\x83\x89\x83\x66\x83\x42\x83\x93", /* Paladin */
+    "\x83\x4F\x83\x8C\x81\x5B\x83\x67\x83\x69\x83\x43\x83\x67", /* Great Knight */
+    "\x83\x67\x83\x8B\x83\x6F\x83\x68\x81\x5B\x83\x8B", /* Troubadour */
+    "\x83\x94\x83\x40\x83\x8B\x83\x4C\x83\x85\x83\x8A\x83\x41", /* Valkyrie */
+    "\x83\x5F\x81\x5B\x83\x4E\x83\x69\x83\x43\x83\x67", /* Dark Knight */
+    "\x83\x7B\x83\x45\x83\x69\x83\x43\x83\x67", /* Bow Knight */
+};
+
+static int rf_guest_starts(Context *ctx, uint32_t address, const char *text) {
+    for (uint32_t i = 0; text[i]; i++)
+        if (mem_read8(ctx, address + i) != (uint8_t)text[i]) return 0;
+    return 1;
+}
+
+static int rf_mounted(Context *ctx, uint32_t unit) {
+    static uint32_t logged[8];
+    uint32_t class_data = mem_read32(ctx, unit + 0x68);
+    if (class_data < 0x100000u || class_data >= 0x10000000u) return 0;
+    for (uint32_t word = 0; word < 16; word++) {
+        uint32_t text = mem_read32(ctx, class_data + 4 * word);
+        if (text < 0x100000u || text >= 0x10000000u || !rf_guest_starts(ctx, text, "JID_")) continue;
+        int mounted = 0;
+        for (size_t i = 0; i < sizeof rf_mounted_classes / sizeof *rf_mounted_classes; i++)
+            if (rf_guest_starts(ctx, text + 4, rf_mounted_classes[i])) mounted = 1;
+        int seen = 0;
+        for (size_t i = 0; i < 8; i++) seen |= logged[i] == unit;
+        if (!seen) {
+            for (size_t i = 0; i < 8; i++)
+                if (!logged[i]) { logged[i] = unit; break; }
+            rf_log("unit %08X: class %08X, ID at +0x%X, %s", unit, class_data, 4 * word, mounted ? "mounted" : "on foot");
+        }
+        return mounted;
+    }
+    return 0;
+}
+
 static void rf_unshift(Context *ctx, uint32_t self) {
     int32_t shift = (int32_t)mem_read32(ctx, self + RF_SHIFT);
     if (!shift) return;
@@ -713,12 +860,52 @@ static void rf_unshift(Context *ctx, uint32_t self) {
     mem_write32(ctx, self + RF_SHIFT, 0);
 }
 
+/* The generated code stops for the host wherever its instruction budget runs out (BUDGET in
+   recomp.h), at random, input or not. A stop inside one of the guest calls below ends this function
+   there: the guest goes back to the caller and the calls after it never run, so a stop inside the
+   sprite left the clip on the row's box and the drawing begun but not ended for the rest of the
+   frame: the list's whole screen flashed green now and then (Thor, 2026-11-19). So with less budget
+   than a row's draw takes (RF_DRAW_COST, measured at 5-13 thousand, see rf_draw_used) the draw is
+   lent that much: the budget and tick_end go up together, so the tick the code works out (tick_end
+   less the budget) stays the same, and both go back after. Stopping here instead (BUDGET, to come
+   back with a new slice) did not work: the host, given a slice too short for a block at this
+   address, runs the instruction here in the interpreter, which goes into the game's own draw, so
+   now and then a frame had the turn rows' text unshifted and no sprites (Thor recording, 2026-11-19). */
+#define RF_DRAW_COST 60000
+static uint32_t rf_drawing; /* the row whose sprite is being drawn, 0 once done */
+static uint32_t rf_draw_logs;
+
+static void rf_draw_used(Context *ctx, int32_t before, const char *what) {
+    if (rf_draw_logs < 8) {
+        rf_draw_logs++;
+        rf_log("row draw (%s): %d of %d budget used", what, (int)(before - ctx->budget), (int)before);
+    }
+}
+
 RECOMP_OVERRIDE(0x001CE024) {
     uint32_t self = ctx->r[0], link = ctx->r[14];
     if (LIKELY(!rf_mine(ctx, self))) TAIL_CALL(RECOMP_ORIGINAL(0x001CE024));
+    if (rf_drawing) {
+        rf_log("row %08X: its sprite's draw was cut short (budget %d)", rf_drawing, (int)ctx->budget);
+        rf_drawing = 0;
+    }
+    uint32_t unit = mem_read32(ctx, self + RF_UNIT_ROW);
+    if (mem_read32(ctx, self + RF_ACTION_ROW) && !unit) TAIL_CALL(RECOMP_ORIGINAL(0x001CE024));
+    int32_t lent = ctx->budget < RF_DRAW_COST ? RF_DRAW_COST : 0;
+    ctx->budget += lent;
+    ctx->tick_end += (uint64_t)lent;
+    int32_t budget_before = ctx->budget;
     rf_unshift(ctx, self);
     uint32_t r4 = ctx->r[4], r5 = ctx->r[5], r6 = ctx->r[6], r7 = ctx->r[7], sp = ctx->r[13];
-    if (!mem_read32(ctx, self + RF_ACTION_ROW)) {
+    /* turn rows' text centred, action rows' from the left (after the indent): the dialog's flag, set
+       for each row as it is drawn */
+    uint32_t owner = mem_read32(ctx, self + 0xC);
+    int turn_row = !mem_read32(ctx, self + RF_ACTION_ROW);
+    if (owner) {
+        uint32_t flags = mem_read32(ctx, owner + 0x4C);
+        mem_write32(ctx, owner + 0x4C, turn_row ? flags | RF_CENTRED : flags & ~RF_CENTRED);
+    }
+    if (turn_row) {
         int32_t height = (int32_t)mem_read32(ctx, self + 0x24);
         int32_t shift = (height - RF_ACTION_HEIGHT) / 2;
         if (shift > 0 && shift < 16) {
@@ -729,17 +916,19 @@ RECOMP_OVERRIDE(0x001CE024) {
         CALL(RECOMP_ORIGINAL(0x001CE024));
         rf_unshift(ctx, self);
         ctx->r[13] = sp;
+        rf_draw_used(ctx, budget_before, "turn");
+        ctx->budget -= lent;
+        ctx->tick_end -= (uint64_t)lent;
         RETURN_TO(link);
     }
-    uint32_t unit = mem_read32(ctx, self + RF_UNIT_ROW);
-    if (!unit) TAIL_CALL(RECOMP_ORIGINAL(0x001CE024));
     CALL(RECOMP_ORIGINAL(0x001CE024));
     ctx->r[13] = sp;
     /* still that unit's row (a rewind may have changed what is there) */
     uint32_t manager = mem_read32(ctx, RF_SPRITE_MANAGER);
     if (manager && mem_read32(ctx, self + RF_UNIT_ROW) == unit && mem_read32(ctx, unit + 0x64)) {
+        rf_drawing = self;
         float x = (float)(int32_t)mem_read32(ctx, self + 0x10) + RF_SPRITE_X;
-        float y = (float)(int32_t)mem_read32(ctx, self + 0x14) + RF_SPRITE_Y;
+        float y = (float)(int32_t)mem_read32(ctx, self + 0x14) + RF_SPRITE_Y + (rf_mounted(ctx, unit) ? RF_MOUNTED_Y : 0);
         uint32_t description = self + RF_SPRITE_DESC, colour = self + RF_SPRITE_COLOUR;
         mem_write32(ctx, colour, 0xFFFFFFFFu);
         for (uint32_t i = 0; i < 0x10; i += 4) mem_write32(ctx, description + i, 0);
@@ -777,7 +966,11 @@ RECOMP_OVERRIDE(0x001CE024) {
         RF_GUEST_CALL(RF_DRAW_CLIP, link);
         RF_GUEST_CALL(RF_DRAW_MODE, link);
         RF_GUEST_CALL(RF_DRAW_END, link);
+        rf_drawing = 0;
+        rf_draw_used(ctx, budget_before, "action");
     }
+    ctx->budget -= lent;
+    ctx->tick_end -= (uint64_t)lent;
     ctx->r[4] = r4;
     ctx->r[5] = r5;
     ctx->r[6] = r6;
