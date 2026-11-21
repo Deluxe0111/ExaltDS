@@ -55,7 +55,14 @@ const FLAGS: u32 = 0x4;
 const PHASE: u32 = 0x8;
 const TURN: u32 = 0xA;
 const PLAYER_PHASE: u16 = 0;
-const IN_CONTROL: u32 = 0x2_0000;
+/// the map's win rule, which its script sets as the battle starts (after the opening scene) with
+/// `ev::ChapterSetWinRule` (0x3B47C8: flags = flags & !0x70000 | rule & 0x70000; the turn-1 banner is
+/// Tlp_Mission01 with 0x40000, else Tlp_Mission02). Every map's script on the cartridge passes 0x20000 or
+/// 0x40000 (the prologue 0x70000) and the DLC's the same, but one DLC map (E000 with ゾンビ離脱) sets 0 in an
+/// event partway through. So a battle counts as started once any rule bit has been seen, until it ends.
+/// Turn and phase read (1, player) already while the map loads. Before 2026-11-21 only 0x20000 was taken:
+/// Recall Fate saved nothing in chapter 3 (0x40000) and stayed greyed (Thor).
+const WIN_RULE: u32 = 0x7_0000;
 const CHANGING_PHASE: u32 = 0x8000_0000;
 /// the turns Recall Fate can go back over (the oldest turn goes first, whole)
 const MAX_TURNS: usize = 5;
@@ -218,6 +225,8 @@ pub struct Recall {
     saved: Option<u16>,
     /// whether this battle has been looked at since it appeared
     looked: bool,
+    /// whether this battle's win rule has been seen set (WIN_RULE): it has started
+    started: bool,
     checkpoints: Vec<Checkpoint>,
     /// MAX_TURNS, or debug.zakuro.recall_turns (1-20) for testing
     max_turns: usize,
@@ -246,6 +255,7 @@ impl Recall {
             battle: 0,
             saved: None,
             looked: false,
+            started: false,
             checkpoints: Vec::new(),
             actions: Vec::new(),
             hashes: None,
@@ -326,7 +336,10 @@ impl Recall {
         let word = system.memory.peek32(battle + PHASE);
         let (phase, turn) = (word as u16, (word >> 16) as u16);
         debug_assert_eq!(TURN, PHASE + 2);
-        let playing = phase == PLAYER_PHASE && turn != 0 && flags & IN_CONTROL != 0 && flags & CHANGING_PHASE == 0;
+        if flags & WIN_RULE != 0 {
+            self.started = true;
+        }
+        let playing = phase == PLAYER_PHASE && turn != 0 && self.started && flags & CHANGING_PHASE == 0;
         let first_look = !self.looked;
         self.looked = true;
         if !playing {
@@ -435,6 +448,7 @@ impl Recall {
         self.saved = None;
         self.hashes = None;
         self.looked = false;
+        self.started = false;
         self.checkpoints.clear();
         self.actions.clear();
         self.units.clear();
@@ -488,6 +502,7 @@ impl Recall {
         // as it was when the checkpoint was taken: that turn's player phase already saved
         self.saved = Some(turn);
         self.looked = true;
+        self.started = true;
         self.publish();
         log::info!("Recall Fate: back to checkpoint {id} (turn {turn}) in {:.0} ms", start.elapsed().as_secs_f64() * 1000.0);
         Ok(())
