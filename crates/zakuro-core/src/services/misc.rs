@@ -207,8 +207,25 @@ pub fn handle(
                 buffer.reply(&mut system.memory, command, &[0]);
                 true
             }
-            // CloseAsync and friends still have to signal their event.
-            0x0005 | 0x0008 => {
+            // GetConnectResult
+            0x0005 => {
+                buffer.reply(&mut system.memory, command, &[]);
+                true
+            }
+            // CloseAsync(process id, event): closed at once, so the event is
+            // signalled now. Fire Emblem Awakening's Bonus Box "Update now"
+            // closes after CreateDefaultConfig fails and waits on this event
+            // with no timeout.
+            0x0008 => {
+                let event = buffer.get(&mut system.memory, 4);
+                if let Some(object) = system.kernel.resolve(event) {
+                    system.kernel.signal_event(object);
+                }
+                buffer.reply(&mut system.memory, command, &[]);
+                true
+            }
+            // GetCloseResult
+            0x0009 => {
                 buffer.reply(&mut system.memory, command, &[]);
                 true
             }

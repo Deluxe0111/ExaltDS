@@ -32,6 +32,15 @@ struct Window(NativeWindow);
 /// How many times one second-display window's surface is rebuilt after present errors.
 const SECOND_REBUILDS: u32 = 3;
 
+/// "Unlock bonus box content" (ExaltDS, Fire Emblem Awakening), from the game's settings at launch.
+static BONUS_BOX: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(true);
+
+/// For title.so (exalt-mods' bonus_box.c): 1 when every SpotPass bonus goes into the Bonus Box.
+#[no_mangle]
+pub extern "C" fn zakuro_bonus_box() -> u32 {
+    BONUS_BOX.load(std::sync::atomic::Ordering::Acquire) as u32
+}
+
 /// A new surface and swapchain for a second display whose presenter failed. The old one
 /// (its VkSurfaceKHR, swapchain and any own device) is destroyed first, since a window
 /// takes only one surface. On the shared device if given, else on GPU readback.
@@ -959,6 +968,7 @@ pub fn run(app: &AndroidApp) -> Result<(), String> {
             if settings.region >= 0 {
                 loaded.config.region = settings.region as u8;
             }
+            BONUS_BOX.store(settings.bonus_box, std::sync::atomic::Ordering::Release);
             // The loader selected only enhancements matching this title/build.
             for cheat in loaded.cheats.iter_mut().filter(|cheat| cheat.builtin) {
                 cheat.enabled = settings.enhancements.contains(&cheat.name);

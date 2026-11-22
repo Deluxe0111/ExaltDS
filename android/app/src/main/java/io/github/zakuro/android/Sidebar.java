@@ -309,6 +309,9 @@ final class Sidebar {
         });
         if (naga == null) { nagaBox.setEnabled(false); nagaBox.setAlpha(0.45f); nagaBox.setText("Naga's Tear: set it up from the start page"); }
         main.addView(nagaBox);
+        // SpotPass bonuses (exalt-mods' bonus_box.c): Nintendo's servers are gone, so the Bonus Box gets everything they
+        // delivered. A save keeps what it received when this goes off.
+        main.addView(check("Unlock bonus box content", s.flag("bonus_box"), on -> { s.values.put("bonus_box", on); save(); }));
         boolean pack = hasPack();
         CheckBox hd = check("HD textures", pack && s.textures, on -> { s.textures = on; save(); });
         if (!pack) { hd.setEnabled(false); hd.setAlpha(0.45f); hd.setText("HD textures: import a pack in Mods / textures"); }

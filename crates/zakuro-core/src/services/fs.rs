@@ -1090,6 +1090,25 @@ fn open_self_ncch(
         SELF_NCCH_ROMFS
     };
 
+    // an ExeFS path names its file in the 8 bytes after the kind, "icon"
+    // for the SMDH a title checks the agreed EULA version against,
+    // "banner", "logo", ".code"
+    if kind == SELF_NCCH_EXEFS && path_type == PATH_BINARY && path_size >= 12 {
+        let mut name = [0u8; 8];
+        system.memory.read_bytes(path_ptr + 4, &mut name);
+        let end = name.iter().position(|&b| b == 0).unwrap_or(name.len());
+        let name = String::from_utf8_lossy(&name[..end]).into_owned();
+        let title = system.title.as_ref()?;
+        let Some(data) = title.exefs_file(&name).map(<[u8]>::to_vec) else {
+            log::warn!("fs: SelfNCCH ExeFS has no {name:?}");
+            return None;
+        };
+        return Some(system.services.fs.add_file(OpenFile {
+            path: format!("exefs:/{name}"),
+            backing: FileBacking::Memory(data),
+        }));
+    }
+
     open_ncch_kind(system, kind)
 }
 

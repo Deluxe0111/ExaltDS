@@ -12,6 +12,10 @@ pub const USA: u64 = 0x0004_0000_000A_0500;
 pub const EUR: u64 = 0x0004_0000_0009_F100;
 
 /// ExaltDS's game-code overrides for the USA release, compiled into title.so with the game's own
-/// code (3dsrecomp's overrides): Recall Fate in the battle map menu, and the feet ground hook.
-pub const OVERRIDES: &[(&str, &str)] =
-    &[("recall_fate.c", include_str!("../overrides/recall_fate.c")), ("feet.c", include_str!("../overrides/feet.c"))];
+/// code (3dsrecomp's overrides): Recall Fate in the battle map menu, the feet ground hook, and the
+/// SpotPass bonuses on by default.
+pub const OVERRIDES: &[(&str, &str)] = &[
+    ("recall_fate.c", include_str!("../overrides/recall_fate.c")),
+    ("feet.c", include_str!("../overrides/feet.c")),
+    ("bonus_box.c", include_str!("../overrides/bonus_box.c")),
+];

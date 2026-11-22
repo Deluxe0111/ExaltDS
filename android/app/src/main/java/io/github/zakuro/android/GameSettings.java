@@ -100,6 +100,7 @@ final class GameSettings {
         number("System", "region", "Console region", -1, -1, 6, "Automatic uses the game's own region."),
         number("System", "language", "Console language", 1, 0, 11, "Games only provide languages included in their release."),
         flag("System", "new_3ds", "Emulate New Nintendo 3DS", false, "Changes the emulated console model and extra controls. Requires a restart."),
+        flag("System", "bonus_box", "Unlock bonus box content", true, "Fire Emblem Awakening: every SpotPass bonus team, item, map and Double Duel challenger in Wireless > Bonus Box, as if delivered. A save keeps what it received. Requires a restart."),
         flag("Advanced", "hardware_renderer", "Hardware 3D renderer", true, "Use GPU rendering. Disable for the upstream software 3D renderer. Vulkan still presents the screens; HD textures, resolution scaling and interpolation require hardware rendering."),
         flag("Advanced", "aot", "Use compiled native game code", true, "Recommended. Turn off to use the interpreter for troubleshooting; it can be considerably slower."),
         flag("Advanced", "skip_idle_loops", "Skip idle loops", true, "Upstream optimization for loops waiting for an event."),

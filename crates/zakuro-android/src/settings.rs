@@ -123,6 +123,9 @@ pub struct Advanced {
     pub region: i32,
     pub language: i32,
     pub new_3ds: bool,
+    /// ExaltDS, Fire Emblem Awakening: every SpotPass bonus in the Bonus Box (exalt-mods'
+    /// bonus_box.c asks for it through `zakuro_bonus_box`).
+    pub bonus_box: bool,
     pub skip_idle_loops: bool,
     #[serde(alias = "recompiled")]
     pub aot: bool,
@@ -218,6 +221,7 @@ impl Default for Advanced {
             region: -1,
             language: 1,
             new_3ds: false,
+            bonus_box: true,
             skip_idle_loops: true,
             aot: true,
             speed_limit: 100,
