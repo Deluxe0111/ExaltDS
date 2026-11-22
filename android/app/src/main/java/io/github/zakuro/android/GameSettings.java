@@ -161,7 +161,31 @@ final class GameSettings {
         // Launcher and NativeActivity use separate processes, and only the foreground UI edits settings.
         return context.getSharedPreferences("games", Context.MODE_MULTI_PROCESS);
     }
-    static GameSettings load(Context context, String id) { return from(preferences(context).getAll(), id); }
+    static GameSettings load(Context context, String id) {
+        GameSettings settings = from(preferences(context).getAll(), id);
+        if (Exalt.is(context)) settings.secondDisplayOnce(context);
+        return settings;
+    }
+    /**
+     * ExaltDS: the first time a game's settings are read with a second presentation display present (the lower screen
+     * of an AYN Thor or Retroid Pocket Duo), the bottom screen goes there. Only once per game: if the player turns it
+     * off afterwards, it stays off.
+     */
+    private void secondDisplayOnce(Context context) {
+        String marker = id + ".dual_display_auto";
+        SharedPreferences preferences = preferences(context);
+        if (preferences.getBoolean(marker, false) || !hasSecondDisplay(context)) return;
+        values.put("dual_display", true);
+        preferences.edit().putBoolean(id + ".advanced.dual_display", true).putBoolean(marker, true).commit();
+        android.util.Log.i("Zakuro", "Second display found: bottom screen on second display turned on for " + id);
+    }
+    static boolean hasSecondDisplay(Context context) {
+        android.hardware.display.DisplayManager displays = context.getSystemService(android.hardware.display.DisplayManager.class);
+        if (displays == null) return false;
+        for (android.view.Display display : displays.getDisplays(android.hardware.display.DisplayManager.DISPLAY_CATEGORY_PRESENTATION))
+            if (display.getDisplayId() != android.view.Display.DEFAULT_DISPLAY && display.isValid()) return true;
+        return false;
+    }
     GameSettings copy() {
         GameSettings result = new GameSettings(id); result.driver = driver; result.name = name; result.resolution = resolution; result.textures = textures;
         result.controllerBindings.putAll(controllerBindings); result.values.putAll(values); result.enhancements.addAll(enhancements); return result;
