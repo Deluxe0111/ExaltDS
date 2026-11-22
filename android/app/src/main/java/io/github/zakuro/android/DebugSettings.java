@@ -35,10 +35,27 @@ public final class DebugSettings extends BroadcastReceiver {
                 if (!file.isFile()) throw new IllegalArgumentException("no " + file);
                 Context app = context.getApplicationContext(); String game = id;
                 new Thread(() -> {
-                    try { android.util.Log.i("Zakuro", "HD movie import: done. " + ExaltMovies.importPath(app, game, file.getPath())); }
+                    try { android.util.Log.e("Zakuro", "HD movie import: done. " + ExaltMovies.importPath(app, game, file.getPath())); }
                     catch (Exception e) { android.util.Log.e("Zakuro", "HD movie import: failed: " + e.getMessage()); }
                 }, "exalt-hd-movies").start();
                 setResult(0, "{\"hdimport\":\"" + file + "\"}", null);
+                return;
+            }
+            // --es textureimport <folder>: a texture pack pushed to transfer/<id>/<folder>, added through the same
+            // importer as the sidebar's (pictures replace installed ones), on a thread; the result goes to logcat
+            String pack = intent.getStringExtra("textureimport");
+            if (pack != null) {
+                File folder = new File(context.getExternalFilesDir(null), "transfer/" + id + "/" + new File(pack).getName());
+                if (!folder.isDirectory()) throw new IllegalArgumentException("no folder " + folder);
+                Context app = context.getApplicationContext(); String game = id;
+                new Thread(() -> {
+                    try {
+                        GameImport.TextureImport found = GameImport.inspectTextures(app, game, new FileSource(), folder.getPath());
+                        android.util.Log.e("Zakuro", "Texture import: " + found.pictures + " pictures, " + found.clashing.size() + " already installed");
+                        android.util.Log.e("Zakuro", "Texture import: done. " + GameImport.addTextures(app, found, true, (bytes, files, name) -> {}));
+                    } catch (Exception e) { android.util.Log.e("Zakuro", "Texture import: failed: " + e); }
+                }, "exalt-textures").start();
+                setResult(0, "{\"textureimport\":\"" + folder + "\"}", null);
                 return;
             }
             GameSettings settings = GameSettings.load(context, id);
@@ -85,6 +102,19 @@ public final class DebugSettings extends BroadcastReceiver {
             return "{\"transfer\":\"" + direction + "\",\"path\":\"" + outside + "\"}";
         } catch (IllegalArgumentException e) { throw e; }
         catch (Exception e) { throw new IllegalArgumentException("transfer failed: " + e); }
+    }
+    /** A plain folder as an import source; entry ids are absolute paths. */
+    private static final class FileSource implements ImportPlan.Source {
+        @Override public List<ImportPlan.Entry> children(String id) throws java.io.IOException {
+            File[] kids = new File(id).listFiles();
+            if (kids == null) throw new java.io.IOException("cannot list " + id);
+            List<ImportPlan.Entry> out = new ArrayList<>();
+            for (File k : kids) out.add(new ImportPlan.Entry(k.getPath(), k.getName(), k.isDirectory(), k.isDirectory() ? -1 : k.length()));
+            return out;
+        }
+        @Override public java.nio.channels.SeekableByteChannel open(String id) throws java.io.IOException {
+            return java.nio.file.Files.newByteChannel(new File(id).toPath());
+        }
     }
     private static void readable(File f) {
         f.setReadable(true, false);
