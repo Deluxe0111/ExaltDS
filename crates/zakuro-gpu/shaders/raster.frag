@@ -619,12 +619,18 @@ void combine_stage(
         && (combiner & 0x000F000Fu) == 0u && scale == 0u;
     if (!passes) {
         vec4 constant = unpack_color(tev[stage * 2u].w);
-        vec4 rgb_in[3];
-        vec4 alpha_in[3];
-        for (uint i = 0u; i < 3u; i++) {
-            rgb_in[i] = source_value((source >> (i * 4u)) & 0xFu, primary, fragment_primary, fragment_secondary, textures, previous, held, constant);
-            alpha_in[i] = source_value((source >> (16u + i * 4u)) & 0xFu, primary, fragment_primary, fragment_secondary, textures, previous, held, constant);
-        }
+        // written out, not looped: with the registers constant the driver folds each source
+        // to one value only when no loop index stands between them
+        vec4 rgb_in[3] = vec4[3](
+            source_value((source >> 0u) & 0xFu, primary, fragment_primary, fragment_secondary, textures, previous, held, constant),
+            source_value((source >> 4u) & 0xFu, primary, fragment_primary, fragment_secondary, textures, previous, held, constant),
+            source_value((source >> 8u) & 0xFu, primary, fragment_primary, fragment_secondary, textures, previous, held, constant)
+        );
+        vec4 alpha_in[3] = vec4[3](
+            source_value((source >> 16u) & 0xFu, primary, fragment_primary, fragment_secondary, textures, previous, held, constant),
+            source_value((source >> 20u) & 0xFu, primary, fragment_primary, fragment_secondary, textures, previous, held, constant),
+            source_value((source >> 24u) & 0xFu, primary, fragment_primary, fragment_secondary, textures, previous, held, constant)
+        );
         uint color_op = operation(combiner);
         uint alpha_op = operation(combiner >> 16);
         vec3 rgb = combine_rgb(

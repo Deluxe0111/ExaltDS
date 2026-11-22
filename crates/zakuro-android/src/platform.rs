@@ -33,7 +33,8 @@ impl log::Log for AndroidLog {
             log::Level::Error => 6,
             log::Level::Warn => 5,
             _ => 4,
-        };
+        }
+        .max(priority_floor());
         if let Ok(message) =
             std::ffi::CString::new(format!("{}: {}", record.target(), record.args()))
         {
@@ -53,6 +54,13 @@ fn debug_targets() -> &'static [String] {
         let text = system_property(c"debug.zakuro.log").unwrap_or_default();
         text.split(',').map(str::trim).filter(|prefix| !prefix.is_empty()).map(str::to_owned).collect()
     })
+}
+
+/// Development switch: `adb shell setprop debug.zakuro.log_priority 6` (before the game starts) writes every line at
+/// that logcat priority or higher, for devices whose logd keeps only errors (the Retroid Pocket Duo drops info).
+fn priority_floor() -> i32 {
+    static FLOOR: std::sync::OnceLock<i32> = std::sync::OnceLock::new();
+    *FLOOR.get_or_init(|| system_property(c"debug.zakuro.log_priority").and_then(|text| text.parse().ok()).unwrap_or(0).clamp(0, 6))
 }
 
 /// An Android system property's value, none when it is unset or empty.
