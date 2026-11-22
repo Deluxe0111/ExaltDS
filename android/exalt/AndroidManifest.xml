@@ -1,6 +1,6 @@
 <!-- ExaltDS: the Zakuroishi app built as its own package for Fire Emblem Awakening (classes stay in io.github.zakuro.android,
      so the native bridge's JNI names are shared). The launcher starts straight into the game; the sidebar holds the rest. -->
-<manifest xmlns:android="http://schemas.android.com/apk/res/android" package="io.github.exaltds" android:versionCode="4" android:versionName="0.1.3">
+<manifest xmlns:android="http://schemas.android.com/apk/res/android" package="io.github.exaltds" android:versionCode="5" android:versionName="0.1.4">
     <uses-sdk android:minSdkVersion="30" android:targetSdkVersion="35" />
     <!-- update checks against GitHub and opt-in diagnostics; installing an update the player accepted -->
     <uses-permission android:name="android.permission.INTERNET" />
