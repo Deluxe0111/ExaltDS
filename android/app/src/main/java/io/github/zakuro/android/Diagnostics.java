@@ -32,7 +32,7 @@ final class Diagnostics {
     }
 
     /** An app can read its own uid's log without any permission; both of our processes share that uid. */
-    private static String log() {
+    static String log() {
         try {
             Process process = new ProcessBuilder("logcat", "-d", "-t", String.valueOf(LOG_LINES)).redirectErrorStream(true).start();
             ByteArrayOutputStream log = new ByteArrayOutputStream();

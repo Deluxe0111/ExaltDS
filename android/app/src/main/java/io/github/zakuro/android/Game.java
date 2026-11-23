@@ -501,6 +501,7 @@ public final class Game extends NativeActivity {
         overlays();
         displays = (android.hardware.display.DisplayManager)getSystemService(DISPLAY_SERVICE);
         displays.registerDisplayListener(displayListener,hud); updateSecondDisplay();
+        if (exalt) LogExporter.checkPreviousRun(this); // asks to save the log after a crash or ANR last time
         if (state != null && state.getString("runtimeError") != null)
             showRuntimeError(state.getString("runtimeError"));
     }

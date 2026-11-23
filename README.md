@@ -127,6 +127,12 @@ frame-rate totals and crash locations (library and offset), tied to a random ID.
 files, saves or game data. Change it any time in the sidebar. Update checks ask GitHub for the latest release and send
 nothing else.
 
+## Reporting a bug
+
+Attach a log to every crash or freeze report. In the sidebar, choose **Save diagnostic log**: it saves the log to
+`Download/exaltds_logs` on your device. After a crash, ExaltDS offers to save the log from that run the next time
+you open it. If the game freezes, save the log from the sidebar before you close it. Nothing is uploaded. The log contains app file paths and file names, so read it before you share it.
+
 ## Building
 
 ExaltDS is built from this repository (a fork of [Zakuroishi](https://github.com/Sekyleky/Zakuroishi), whose own

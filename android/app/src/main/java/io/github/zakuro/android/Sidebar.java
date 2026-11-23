@@ -71,6 +71,15 @@ final class Sidebar {
         d.show(); game.palette().dialog(d, false);
     }
 
+    /** Download/exaltds_logs, for bug reports (LogExporter). Java only: works while the game is hung. */
+    private void saveLog() {
+        toast("Saving the log…");
+        new Thread(() -> {
+            try { LogExporter.toast(game, "Log saved to " + LogExporter.saveCurrent(game)); }
+            catch (Exception e) { android.util.Log.e("Zakuro", "Saving the log", e); LogExporter.toast(game, "Could not save the log: " + e.getMessage()); }
+        }, "ExaltDS log").start();
+    }
+
     // ---- updates (ExaltUpdater) ----
 
     private void checkUpdate() {
@@ -329,6 +338,7 @@ final class Sidebar {
                 ExaltTelemetry.setConsent(game, on);
                 game.telemetry(on);
             }));
+        main.addView(row("Save diagnostic log", v -> saveLog()));
         if (ExaltUpdater.available(game)) main.addView(row("Check for updates", v -> checkUpdate()));
         main.addView(divider());
         main.addView(row("Restart game", v -> { close(true); game.confirmRestart(); }));
