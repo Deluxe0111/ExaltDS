@@ -27,6 +27,9 @@ import urllib.request
 import zipfile
 
 POOL = 'https://packages.termux.dev/apt/termux-main/pool/main/'
+POOLS = (POOL,
+         'https://packages-cf.termux.dev/apt/termux-main/pool/main/',
+         'https://mirrors.aliyun.com/termux/termux-main/pool/main/')
 PACKAGES = [
     ('c/clang/clang_21.1.8-3_aarch64.deb', '9fb565013b96ce10abd8f8f217aaebb48f72873f53acbf8886329bcea841a21c'),
     ('l/lld/lld_21.1.8-3_aarch64.deb', '6299c8fdff59dcff972f6b444805bcdb211c2bd797a64d2ddb3875e699f30630'),
@@ -55,10 +58,26 @@ def fetch(cache):
         file = os.path.join(cache, os.path.basename(path))
         if not os.path.isfile(file) or hashlib.sha256(open(file, 'rb').read()).hexdigest() != sha:
             print('fetching', path)
-            data = urllib.request.urlopen(POOL + path, timeout=120).read()
-            if hashlib.sha256(data).hexdigest() != sha:
-                sys.exit(f'{path}: SHA-256 does not match the pinned one')
-            open(file, 'wb').write(data)
+            failures = []
+            for pool in POOLS:
+                url = pool + path
+                try:
+                    with urllib.request.urlopen(url, timeout=120) as response:
+                        data = response.read()
+                    if hashlib.sha256(data).hexdigest() != sha:
+                        raise ValueError('SHA-256 does not match the pinned one')
+                except (OSError, ValueError) as error:
+                    failures.append(f'{url}: {error}')
+                    print(f'  {failures[-1]}', flush=True)
+                    continue
+                temporary = file + '.tmp'
+                with open(temporary, 'wb') as output:
+                    output.write(data)
+                os.replace(temporary, file)
+                break
+            else:
+                sys.exit(f'{path}: no mirror supplied the pinned package. '
+                         f'Place a matching .deb (SHA-256 {sha}) in {cache}.\n' + '\n'.join(failures))
         yield file
 
 
