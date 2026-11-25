@@ -44,7 +44,10 @@ final class Exalt {
     /** The one imported game (ExaltDS holds just Awakening), or null before setup. */
     static String gameId(Context c) {
         SortedSet<String> ids = GameImport.importedIds(c.getFilesDir());
-        return ids.isEmpty() ? null : ids.first();
+        String selected = prefs(c).getString("active_title", "");
+        if (ExaltSetup.supported(selected) && ids.contains(selected)) return selected;
+        for (String id : ids) if (ExaltSetup.supported(id)) return id;
+        return null;
     }
 
     // ---- mod layers ----
@@ -302,8 +305,14 @@ final class Exalt {
         if (prefs(c).getBoolean(id + ".defaults", false)) return;
         GameSettings s = GameSettings.load(c, id);
         setWide(s, true);
-        s.enhancements.add("No glow");
-        setCombat(s, 1);
+        if (ExaltSetup.USA.equals(id)) {
+            s.enhancements.add("No glow");
+            setCombat(s, 1);
+        } else {
+            s.enhancements.remove("No glow");
+            setCombat(s, 0);
+            s.values.put("bonus_box", false);
+        }
         s.save(c);
         prefs(c).edit().putBoolean(id + ".defaults", true).commit();
     }

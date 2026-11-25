@@ -17,7 +17,7 @@ import java.util.zip.ZipEntry;
 import java.util.zip.ZipInputStream;
 
 /**
- * ExaltDS's setup from the player's own files: Fire Emblem Awakening (US) as a decrypted .3ds/.cci/.cia and, optionally,
+ * ExaltDS's setup from the player's own files: Fire Emblem Awakening (US or EUR) as a decrypted .3ds/.cci/.cia and, optionally,
  * its DLC .cia. The files are copied into the app; the native side (crates/zakuro-android/src/setup.rs) builds the feet and
  * Naga's Tear layers from them and recompiles the game's code into title.so with the compiler the APK carries; then the
  * game is installed (GameImport.installBuilt) with its layers. Nothing of the game comes with the app.
@@ -30,8 +30,9 @@ final class ExaltSetup {
     private static native int[] nativeProgress();
     static native void nativeCancel();
 
-    /** Fire Emblem Awakening, US. */
-    static final String TITLE = "00040000000A0500";
+    /** Fire Emblem Awakening, revision 0. */
+    static final String USA = "00040000000A0500", EUR = "000400000009F100";
+    static boolean supported(String id) { return USA.equals(id) || EUR.equals(id); }
     static final String FEET = "Feet", NAGA = "Naga's Tear";
     /** about what setup needs besides the game and DLC: the C (~200 MB), objects, the layers and some room */
     private static final long WORK_BYTES = 1L << 30;
@@ -123,8 +124,9 @@ final class ExaltSetup {
             copy(c, rom, romFile, "game", ui);
             if (dlc != null) copy(c, dlc, dlcFile, "DLC", ui);
             ui.say("Checking the game…");
-            String problem = nativeInspect(romFile.getAbsolutePath(), dlcFile == null ? "" : dlcFile.getAbsolutePath());
-            if (problem != null) throw new IOException(problem);
+            String title = nativeInspect(romFile.getAbsolutePath(), dlcFile == null ? "" : dlcFile.getAbsolutePath());
+            if (!supported(title)) throw new IOException(title == null ? "Could not identify the game." : title);
+            boolean us = USA.equals(title);
             File kit = kit(c, ui);
             File work = new File(setup, "work"), layers = new File(setup, "layers");
             GameImport.mkdir(work); GameImport.mkdir(layers);
@@ -132,7 +134,7 @@ final class ExaltSetup {
             // progress from the native side while it builds
             String[] error = {null};
             Thread builder = new Thread(() -> error[0] = nativeBuild(romFile.getAbsolutePath(), work.getAbsolutePath(), kit.getAbsolutePath(),
-                    c.getApplicationInfo().nativeLibraryDir, layers.getAbsolutePath(), true, true), "exalt-setup-build");
+                    c.getApplicationInfo().nativeLibraryDir, layers.getAbsolutePath(), true, us), "exalt-setup-build");
             long started = System.currentTimeMillis();
             builder.start();
             while (builder.isAlive()) {
@@ -144,21 +146,21 @@ final class ExaltSetup {
             if (error[0] != null) throw new IOException(error[0]);
 
             ui.say("Installing…");
-            GameImport.installBuilt(c, TITLE, "Fire Emblem Awakening", romFile, new File(work, "title.so"), dlcFile);
+            GameImport.installBuilt(c, title, "Fire Emblem Awakening", romFile, new File(work, "title.so"), dlcFile);
             // the layers: the feet on, Naga's Tear as chosen
-            File home = Exalt.layers(c, TITLE);
+            File home = Exalt.layers(c, title);
             GameImport.mkdir(home);
-            for (Exalt.Layer l : Exalt.list(c, TITLE)) if (l.feet() || l.naga()) Exalt.delete(c, TITLE, l.name);
+            for (Exalt.Layer l : Exalt.list(c, title)) if (l.feet() || l.naga()) Exalt.delete(c, title, l.name);
             for (String name : new String[]{FEET, NAGA}) {
                 File built = new File(layers, name);
                 if (built.isDirectory()) Files.move(built.toPath(), new File(home, name).toPath());
             }
-            Exalt.setOn(c, TITLE, FEET, true);
-            Exalt.setOn(c, TITLE, NAGA, naga);
-            Exalt.apply(c, TITLE);
-            Exalt.firstSetup(c, TITLE);
-            Exalt.prefs(c).edit().putBoolean("launch_failed", false).commit();
-            return TITLE;
+            Exalt.setOn(c, title, FEET, true);
+            Exalt.setOn(c, title, NAGA, us && naga);
+            Exalt.apply(c, title);
+            Exalt.firstSetup(c, title);
+            Exalt.prefs(c).edit().putString("active_title", title).putBoolean("launch_failed", false).commit();
+            return title;
         } finally {
             GameImport.remove(setup);
         }

@@ -112,7 +112,7 @@ public final class ExaltHome extends Activity {
             setupOpen = true;
             actions.addView(button(game == null ? "Choose your game file…" : "Game: " + ExaltSetup.displayName(this, game), game == null, v -> pick(PICK_GAME)));
             actions.addView(button(dlc == null ? "Add the DLC (optional)…" : "DLC: " + ExaltSetup.displayName(this, dlc), false, v -> pick(PICK_DLC)));
-            actions.addView(check("Naga's Tear (experimental)", naga, on -> {
+            actions.addView(check("Naga's Tear (US only, experimental)", naga, on -> {
                 naga = on;
                 if (on) new AlertDialog.Builder(this, android.R.style.Theme_DeviceDefault_Dialog_Alert).setTitle("Naga's Tear")
                         .setMessage("You'll receive Naga's Tear the next time you enter the world map: Robin and Chrom find it, and "
@@ -128,7 +128,14 @@ public final class ExaltHome extends Activity {
         } else {
             if (status.getText().length() == 0) status.setText(Exalt.prefs(this).getBoolean("launch_failed", false)
                     ? "The game stopped last time. Set it up again if its files are damaged, or try again." : "Ready.");
-            actions.addView(button("Play", true, v -> { Exalt.prefs(this).edit().putBoolean("launch_failed", false).commit(); play(); }));
+            actions.addView(button("Play (" + (ExaltSetup.EUR.equals(id) ? "EU" : "US") + ")", true, v -> { Exalt.prefs(this).edit().putBoolean("launch_failed", false).commit(); play(); }));
+            String other = ExaltSetup.USA.equals(id) ? ExaltSetup.EUR : ExaltSetup.USA;
+            if (GameImport.importedIds(getFilesDir()).contains(other)) {
+                actions.addView(button("Switch to " + (ExaltSetup.EUR.equals(other) ? "EU" : "US") + " edition", false, v -> {
+                    Exalt.prefs(this).edit().putString("active_title", other).putBoolean("launch_failed", false).commit();
+                    status.setText(""); refresh();
+                }));
+            }
             actions.addView(button("Set up the game again…", false, v -> { setupOpen = true; status.setText(SETUP_TEXT); refresh(); }));
             actions.addView(button("Export in-game saves…", false, v -> pickSaves(true)));
             actions.addView(button("Restore in-game saves…", false, v -> pickSaves(false)));
@@ -137,7 +144,7 @@ public final class ExaltHome extends Activity {
         if (first != null) first.post(first::requestFocusFromTouch);
     }
 
-    private static final String SETUP_TEXT = "Choose your own decrypted Fire Emblem Awakening (US) as a .3ds, .cci or .cia file, and its DLC "
+    private static final String SETUP_TEXT = "Choose your own decrypted Fire Emblem Awakening (US or European, revision 0) as a .3ds, .cci or .cia file, and its DLC "
             + ".cia if you have it. ExaltDS builds the game's code for this device from it: this takes about 5 to 10 minutes. "
             + "Keep ExaltDS open and the device charging. Your saves stay as they are.";
 
@@ -244,9 +251,9 @@ public final class ExaltHome extends Activity {
         Uri g = game, d = dlc;
         boolean n = naga;
         run("Starting setup…", () -> {
-            ExaltSetup.run(getApplicationContext(), g, d, n, text -> runOnUiThread(() -> status.setText(text)));
+            String title = ExaltSetup.run(getApplicationContext(), g, d, n, text -> runOnUiThread(() -> status.setText(text)));
             return "The game is set up. Press Play; the sidebar (Back in game) has the settings, mods and textures."
-                    + (n ? "\n\nNaga's Tear is on (experimental): you'll receive it the next time you enter the world map." : "");
+                    + (ExaltSetup.EUR.equals(title) ? "\n\nEuropean edition (experimental): Naga's Tear, Bonus Box unlock, No glow and combat 60 fps are not ported yet." : n ? "\n\nNaga's Tear is on (experimental): you'll receive it the next time you enter the world map." : "");
         });
     }
 

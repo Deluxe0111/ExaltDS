@@ -292,6 +292,7 @@ final class Sidebar {
         combat.setOnClickListener(v -> choose(combat, COMBAT, Exalt.combat(s), i -> {
             Exalt.setCombat(s, i); save(); combat.setText("Combat: " + COMBAT[i] + "  ▾");
         }));
+        if (ExaltSetup.EUR.equals(id)) { combat.setEnabled(false); combat.setText("Combat: 30 fps (EU 60 fps not ported)"); }
         main.addView(combat);
         String[] scales = {"1× (native)", "2×", "3×", "4×"};
         Button res = row("", null);
@@ -316,11 +317,12 @@ final class Sidebar {
             if (n != null) { Exalt.setOn(game, id, n.name, on); modsChanged = true; refreshApply(); }
             if (on) notice("Naga's Tear", NAGA_NOTICE);
         });
-        if (naga == null) { nagaBox.setEnabled(false); nagaBox.setAlpha(0.45f); nagaBox.setText("Naga's Tear: set it up from the start page"); }
+        if (naga == null || ExaltSetup.EUR.equals(id)) { nagaBox.setEnabled(false); nagaBox.setAlpha(0.45f); nagaBox.setText(ExaltSetup.EUR.equals(id) ? "Naga's Tear: not ported to EU yet" : "Naga's Tear: set it up from the start page"); }
         main.addView(nagaBox);
         // SpotPass bonuses (exalt-mods' bonus_box.c): Nintendo's servers are gone, so the Bonus Box gets everything they
         // delivered. A save keeps what it received when this goes off.
-        main.addView(check("Unlock bonus box content", s.flag("bonus_box"), on -> { s.values.put("bonus_box", on); save(); }));
+        if (ExaltSetup.USA.equals(id)) main.addView(check("Unlock bonus box content", s.flag("bonus_box"), on -> { s.values.put("bonus_box", on); save(); }));
+        else main.addView(label("Bonus Box unlock: not ported to EU yet"));
         boolean pack = hasPack();
         CheckBox hd = check("HD textures", pack && s.textures, on -> { s.textures = on; save(); });
         if (!pack) { hd.setEnabled(false); hd.setAlpha(0.45f); hd.setText("HD textures: import a pack in Mods / textures"); }

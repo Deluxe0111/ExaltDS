@@ -21,6 +21,8 @@ It is built for two devices, and tuned for them: the **AYN Thor** and the **Retr
 > **Status:** early, but playable. Everything here has been tested on the AYN Thor (Snapdragon 8 Gen 2) with the US
 > release of the game. The Retroid Pocket Duo is a target device that hasn't been tested yet.
 
+**European edition (experimental):** the setup accepts EUR revision 0, recompiles its own executable, and uses the original EUR widescreen and feet-hook addresses from fe-awakening-recomp (9c9543b). Recall Fate / Naga's Tear, automatic Bonus Box unlock, No glow and combat 60 fps remain US-only until ported. EU device testing is pending. Saves, settings, mod layers and native code remain separate by title ID. If both editions are installed, switch between them on the start page.
+
 ExaltDS contains **no game files**. You need your own legally obtained, decrypted copy of Fire Emblem Awakening.
 
 ## Why ExaltDS
@@ -104,8 +106,8 @@ It isn't supported today, and it's better to do it properly later than to do it 
 | | |
 | --- | --- |
 | **Device** | AYN Thor (tested) or Retroid Pocket Duo (target). 64-bit ARM, Android 11 or newer, Vulkan 1.3. |
-| **Game** | Fire Emblem Awakening, US release (`00040000000A0500`), as a decrypted `.3ds`/`.cci` or `.cia`. |
-| **DLC** | Optional: the decrypted DLC `.cia`. |
+| **Game** | Fire Emblem Awakening, US (`00040000000A0500`) or experimental European (`000400000009F100`) revision 0, as a decrypted `.3ds`/`.cci` or `.cia`. |
+| **DLC** | Optional: the decrypted DLC `.cia` matching the game's region. |
 | **Storage** | The game's size (about 2 GB) plus about 1 GB free during setup; the game's size plus about 0.3 GB after. |
 | **Memory** | 6 GB of RAM minimum; 8 GB or more recommended. Setup runs a compiler on every core. Tested with 16 GB. |
 

@@ -1,4 +1,4 @@
-//! ExaltDS's setup, on the device: from the player's own Fire Emblem Awakening (USA) and,
+//! ExaltDS's setup, on the device: from the player's own Fire Emblem Awakening (USA or EUR, revision 0) and,
 //! optionally, its DLC, it builds the mod layers (exalt-mods: the feet models, Naga's Tear) and the
 //! game's native code: 3dsrecomp writes the game's code as C with ExaltDS's overrides (Recall
 //! Fate, the feet ground hook), and the clang the APK carries (android/exalt/clang-kit.py) compiles
@@ -24,6 +24,21 @@ static TOTAL: AtomicU32 = AtomicU32::new(0);
 static CANCEL: AtomicBool = AtomicBool::new(false);
 
 const USA: u64 = exalt_mods::USA;
+const EUR: u64 = exalt_mods::EUR;
+
+fn supported_title(id: u64, revision: u16) -> Result<(), String> {
+    if !matches!(id, USA | EUR) {
+        return Err(format!("This is not Fire Emblem Awakening (US or European release): {id:016X}."));
+    }
+    if revision != 0 {
+        return Err(format!("Revision {revision} is not supported yet. Use revision 0 of Fire Emblem Awakening."));
+    }
+    Ok(())
+}
+
+fn matching_dlc(id: u64, dlc: u64) -> bool {
+    dlc == (0x0004_008C_0000_0000 | (id & 0xFFFF_FFFF))
+}
 /// clang's target: the API level ExaltDS starts at (Android 11)
 const TARGET: &str = "--target=aarch64-linux-android30";
 
@@ -48,20 +63,17 @@ fn answer(env: &mut JNIEnv, text: Option<String>) -> jstring {
 }
 
 /// Whether the files are a game setup can use: null when they are, else why not.
-fn inspect(rom: &Path, dlc: Option<&Path>) -> Result<(), String> {
+fn inspect(rom: &Path, dlc: Option<&Path>) -> Result<u64, String> {
     let title = zakuro_fs::Title::load(rom).map_err(|e| format!("The game file can't be read: {e}. It must be a decrypted .3ds, .cci or .cia."))?;
-    match title.program_id() {
-        USA => {}
-        exalt_mods::EUR => return Err("This is the European release. ExaltDS supports the US release (00040000000A0500) for now.".into()),
-        other => return Err(format!("This is not Fire Emblem Awakening (US) but title {other:016X}.")),
-    }
+    let id = title.program_id();
+    supported_title(id, title.exheader.remaster_version)?;
     if let Some(dlc) = dlc {
         let dlc = zakuro_fs::Dlc::load(dlc).map_err(|e| format!("The DLC file can't be used: {e}. It must be the decrypted DLC .cia."))?;
-        if dlc.title_id & 0xFFFF_FFFF != USA & 0xFFFF_FFFF {
-            return Err(format!("The DLC file is DLC for another game ({:016X}).", dlc.title_id));
+        if !matching_dlc(id, dlc.title_id) {
+            return Err(format!("The DLC must match the game and region ({:016X}).", dlc.title_id));
         }
     }
-    Ok(())
+    Ok(id)
 }
 
 #[no_mangle]
@@ -74,7 +86,8 @@ pub extern "system" fn Java_io_github_zakuro_android_ExaltSetup_nativeInspect<'a
     crate::platform::init_log();
     let (rom, dlc) = (string(&mut env, &rom), string(&mut env, &dlc));
     let result = inspect(Path::new(&rom), (!dlc.is_empty()).then(|| Path::new(&dlc)));
-    answer(&mut env, result.err())
+    // A successful inspection returns the canonical title ID; an error returns its message.
+    answer(&mut env, Some(match result { Ok(id) => format!("{id:016X}"), Err(error) => error }))
 }
 
 /// [stage, done, total]
@@ -124,12 +137,14 @@ pub extern "system" fn Java_io_github_zakuro_android_ExaltSetup_nativeBuild<'a>(
 fn build(rom: &Path, work: &Path, kit: &Path, programs: &Path, layers: &Path, feet: bool, naga: bool) -> Result<(), String> {
     let started = std::time::Instant::now();
     let title = zakuro_fs::Title::load(rom).map_err(|e| format!("The game file can't be read: {e}"))?;
+    let id = title.program_id();
+    supported_title(id, title.exheader.remaster_version)?;
     if feet {
         stage(1, 0, 0);
         let made = exalt_mods::feet::build(&title, &layers.join("Feet"), &|done, total| stage(1, done as u32, total as u32))?;
         log::info!("ExaltDS setup: feet for {made} bodies");
     }
-    if naga {
+    if naga && id == USA {
         stage(2, 0, 0);
         exalt_mods::naga::layer(&title, &layers.join("Naga's Tear"))?;
         log::info!("ExaltDS setup: Naga's Tear layer built");
@@ -142,8 +157,8 @@ fn build(rom: &Path, work: &Path, kit: &Path, programs: &Path, layers: &Path, fe
     // the overrides, as files 3dsrecomp reads
     let overrides = work.join("overrides");
     std::fs::create_dir_all(&overrides).map_err(|e| e.to_string())?;
-    for (name, text) in exalt_mods::OVERRIDES {
-        std::fs::write(overrides.join(name), text).map_err(|e| format!("{name}: {e}"))?;
+    for (name, text) in exalt_mods::overrides_for(id) {
+        std::fs::write(overrides.join(name), text.as_bytes()).map_err(|e| format!("{name}: {e}"))?;
     }
     let generated = work.join("generated");
     let _ = std::fs::remove_dir_all(&generated);
@@ -192,4 +207,25 @@ fn build(rom: &Path, work: &Path, kit: &Path, programs: &Path, layers: &Path, fe
     let _ = std::fs::remove_dir_all(&generated);
     log::info!("ExaltDS setup: built in {:.0} s", started.elapsed().as_secs_f64());
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    #[test]
+    fn only_known_revision_zero_titles_are_supported() {
+        assert!(supported_title(USA, 0).is_ok());
+        assert!(supported_title(EUR, 0).is_ok());
+        assert!(supported_title(EUR, 1).is_err());
+        assert!(supported_title(USA, 1).is_err());
+        assert!(supported_title(0, 0).is_err());
+    }
+    #[test]
+    fn dlc_matches_region_and_category() {
+        assert!(matching_dlc(USA, 0x0004_008C_000A_0500));
+        assert!(matching_dlc(EUR, 0x0004_008C_0009_F100));
+        assert!(!matching_dlc(USA, 0x0004_008C_0009_F100));
+        assert!(!matching_dlc(EUR, 0x0004_008C_000A_0500));
+        assert!(!matching_dlc(EUR, EUR));
+    }
 }
