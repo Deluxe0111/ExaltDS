@@ -131,6 +131,20 @@ mod tests {
         assert!(!cheats.iter().find(|cheat| cheat.name == "60 FPS").unwrap().enabled);
     }
 
+    #[test]
+    fn awakening_eur_has_only_its_own_rev0_widescreen() {
+        let id = 0x0004_0000_0009_F100;
+        let eu = for_title(id, "rev0");
+        assert_eq!(eu.len(), 1);
+        assert_eq!(eu[0].name, "16:9");
+        assert_eq!(eu[0].lines.len(), 43);
+        assert!(eu[0].lines.contains(&"002FE310 EB0572FA".to_owned()));
+        assert!(eu[0].lines.contains(&"003D57F4 3FE38E39".to_owned()));
+        assert!(!eu[0].lines.contains(&"002FDCAC EB056FD3".to_owned()));
+        assert!(for_title(id, "rev1").is_empty());
+        assert!(tones(id, "rev0").is_empty());
+    }
+
     /// Awakening USA's 16:9, relocated from the EUR code: its sites, and a cave in the text
     /// mapping's padding past the static-constructor table the game walks at boot.
     #[test]

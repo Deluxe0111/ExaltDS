@@ -24,21 +24,7 @@ static TOTAL: AtomicU32 = AtomicU32::new(0);
 static CANCEL: AtomicBool = AtomicBool::new(false);
 
 const USA: u64 = exalt_mods::USA;
-const EUR: u64 = exalt_mods::EUR;
 
-fn supported_title(id: u64, revision: u16) -> Result<(), String> {
-    if !matches!(id, USA | EUR) {
-        return Err(format!("This is not Fire Emblem Awakening (US or European release): {id:016X}."));
-    }
-    if revision != 0 {
-        return Err(format!("Revision {revision} is not supported yet. Use revision 0 of Fire Emblem Awakening."));
-    }
-    Ok(())
-}
-
-fn matching_dlc(id: u64, dlc: u64) -> bool {
-    dlc == (0x0004_008C_0000_0000 | (id & 0xFFFF_FFFF))
-}
 /// clang's target: the API level ExaltDS starts at (Android 11)
 const TARGET: &str = "--target=aarch64-linux-android30";
 
@@ -66,10 +52,10 @@ fn answer(env: &mut JNIEnv, text: Option<String>) -> jstring {
 fn inspect(rom: &Path, dlc: Option<&Path>) -> Result<u64, String> {
     let title = zakuro_fs::Title::load(rom).map_err(|e| format!("The game file can't be read: {e}. It must be a decrypted .3ds, .cci or .cia."))?;
     let id = title.program_id();
-    supported_title(id, title.exheader.remaster_version)?;
+    exalt_mods::supported_title(id, title.exheader.remaster_version)?;
     if let Some(dlc) = dlc {
         let dlc = zakuro_fs::Dlc::load(dlc).map_err(|e| format!("The DLC file can't be used: {e}. It must be the decrypted DLC .cia."))?;
-        if !matching_dlc(id, dlc.title_id) {
+        if !exalt_mods::matching_dlc(id, dlc.title_id) {
             return Err(format!("The DLC must match the game and region ({:016X}).", dlc.title_id));
         }
     }
@@ -138,7 +124,7 @@ fn build(rom: &Path, work: &Path, kit: &Path, programs: &Path, layers: &Path, fe
     let started = std::time::Instant::now();
     let title = zakuro_fs::Title::load(rom).map_err(|e| format!("The game file can't be read: {e}"))?;
     let id = title.program_id();
-    supported_title(id, title.exheader.remaster_version)?;
+    exalt_mods::supported_title(id, title.exheader.remaster_version)?;
     if feet {
         stage(1, 0, 0);
         let made = exalt_mods::feet::build(&title, &layers.join("Feet"), &|done, total| stage(1, done as u32, total as u32))?;
@@ -209,23 +195,3 @@ fn build(rom: &Path, work: &Path, kit: &Path, programs: &Path, layers: &Path, fe
     Ok(())
 }
 
-#[cfg(test)]
-mod tests {
-    use super::*;
-    #[test]
-    fn only_known_revision_zero_titles_are_supported() {
-        assert!(supported_title(USA, 0).is_ok());
-        assert!(supported_title(EUR, 0).is_ok());
-        assert!(supported_title(EUR, 1).is_err());
-        assert!(supported_title(USA, 1).is_err());
-        assert!(supported_title(0, 0).is_err());
-    }
-    #[test]
-    fn dlc_matches_region_and_category() {
-        assert!(matching_dlc(USA, 0x0004_008C_000A_0500));
-        assert!(matching_dlc(EUR, 0x0004_008C_0009_F100));
-        assert!(!matching_dlc(USA, 0x0004_008C_0009_F100));
-        assert!(!matching_dlc(EUR, 0x0004_008C_000A_0500));
-        assert!(!matching_dlc(EUR, EUR));
-    }
-}

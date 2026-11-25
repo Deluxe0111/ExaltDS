@@ -50,3 +50,38 @@ mod region_tests {
         assert!(overrides_for(0).is_empty());
     }
 }
+
+pub fn supported_title(id: u64, revision: u16) -> Result<(), String> {
+    if !matches!(id, USA | EUR) {
+        return Err(format!("This is not Fire Emblem Awakening (US or European release): {id:016X}."));
+    }
+    if revision != 0 {
+        return Err(format!("Revision {revision} is not supported yet. Use revision 0 of Fire Emblem Awakening."));
+    }
+    Ok(())
+}
+
+pub fn matching_dlc(id: u64, dlc: u64) -> bool {
+    dlc == (0x0004_008C_0000_0000 | (id & 0xFFFF_FFFF))
+}
+
+#[cfg(test)]
+mod validation_tests {
+    use super::*;
+    #[test]
+    fn only_known_revision_zero_titles_are_supported() {
+        assert!(supported_title(USA, 0).is_ok());
+        assert!(supported_title(EUR, 0).is_ok());
+        assert!(supported_title(EUR, 1).is_err());
+        assert!(supported_title(USA, 1).is_err());
+        assert!(supported_title(0, 0).is_err());
+    }
+    #[test]
+    fn dlc_matches_region_and_category() {
+        assert!(matching_dlc(USA, 0x0004_008C_000A_0500));
+        assert!(matching_dlc(EUR, 0x0004_008C_0009_F100));
+        assert!(!matching_dlc(USA, 0x0004_008C_0009_F100));
+        assert!(!matching_dlc(EUR, 0x0004_008C_000A_0500));
+        assert!(!matching_dlc(EUR, EUR));
+    }
+}
